@@ -6,6 +6,7 @@
 import errno
 import os
 import shutil
+import time
 import uuid
 from pathlib import Path
 
@@ -14,6 +15,9 @@ import pymupdf
 from pdfeditor.core import errors
 
 _WINERROR_DISK_FULL = 112
+_REPLACE_ATTEMPTS = 5     # 置き換えを試す回数（PermissionError の時だけ試し直す）
+_REPLACE_PAUSE_S = 0.1    # 試し直す前に待つ秒数
+_sleep = time.sleep       # テストで差し替える
 
 _MESSAGES = {
     "locked": "このファイルは他のソフトで開かれているため保存できません。"
@@ -59,13 +63,26 @@ def _page_count_of(data: bytes) -> int:
             doc.close()
 
 
+def _replace(src: Path, dst: Path) -> None:
+    """os.replace。ウイルス対策ソフトや OneDrive が一瞬だけファイルを掴んでいることがあるので、
+    PermissionError なら少し待って試し直す（合計 _REPLACE_ATTEMPTS 回）。"""
+    for attempt in range(1, _REPLACE_ATTEMPTS + 1):
+        try:
+            os.replace(src, dst)
+            return
+        except PermissionError:
+            if attempt == _REPLACE_ATTEMPTS:
+                raise
+            _sleep(_REPLACE_PAUSE_S)
+
+
 def _write_backup(target: Path) -> None:
     """一時名に複製してから置き換える。失敗しても既存のバックアップは壊さない。"""
     bak = backup_path(target)
     bak_tmp = target.with_name(f"{target.stem}.baktmp-{uuid.uuid4().hex[:8]}.pdf")
     try:
         shutil.copy2(target, bak_tmp)
-        os.replace(bak_tmp, bak)
+        _replace(bak_tmp, bak)
     finally:
         try:
             bak_tmp.unlink(missing_ok=True)
@@ -104,7 +121,7 @@ def write_atomically(
             if backup and target.exists():
                 _write_backup(target)
                 made_backup = True
-            os.replace(tmp, target)
+            _replace(tmp, target)
         except OSError as exc:
             raise _classify(exc, writing_tmp=False) from exc
         return made_backup

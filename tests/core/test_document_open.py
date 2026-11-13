@@ -33,6 +33,40 @@ def test_is_signed(signed_flag_pdf, simple_pdf):
     assert PdfDocument.open(signed_flag_pdf).is_signed is True
     assert PdfDocument.open(simple_pdf).is_signed is False
 
+def _bad_count_pdf(tmp_path):
+    import pymupdf
+    doc = pymupdf.open(); [doc.new_page() for _ in range(3)]; raw = doc.tobytes(); doc.close()
+    p = tmp_path / "badcount.pdf"; p.write_bytes(raw.replace(b"/Count 3", b"/Count 9"))
+    return p
+
+
+def test_wrong_page_tree_count_is_reported_as_not_a_pdf(tmp_path):
+    """ページツリーの /Count が壊れた PDF で PyMuPDF が RuntimeError を投げても、日本語で知らせる。"""
+    with pytest.raises(errors.NotAPdfError) as e:
+        PdfDocument.open(_bad_count_pdf(tmp_path))
+    assert "「badcount.pdf」を開けません" in e.value.user_message
+
+
+def test_memory_error_while_checking_is_reported_as_not_a_pdf(simple_pdf, monkeypatch):
+    import pymupdf
+    closed = []
+    real_close = pymupdf.Document.close
+
+    def boom(self, *a, **k): raise MemoryError()
+    monkeypatch.setattr(pymupdf.Document, "authenticate", boom)
+    monkeypatch.setattr(pymupdf.Document, "close",
+                        lambda self: (closed.append(1), real_close(self))[1])
+    with pytest.raises(errors.NotAPdfError):
+        PdfDocument.open(simple_pdf, "x")
+    assert closed  # 開きかけの文書は閉じた
+
+
+def test_insert_broken_pdf_is_not_a_pdf(simple_pdf, tmp_path):
+    d = PdfDocument.open(simple_pdf)
+    with pytest.raises(errors.NotAPdfError): d.insert_from_file(_bad_count_pdf(tmp_path), 0)
+    assert d.page_count == 3
+
+
 def test_close_twice_is_safe(simple_pdf):
     doc = PdfDocument.open(simple_pdf)
     doc.close()

@@ -5,6 +5,8 @@ CMD_DELETE_PAGES = "ページの削除"
 CMD_INSERT_BLANK = "空白ページの追加"
 CMD_INSERT_PDF = "PDF の挿入"
 CMD_ROTATE_PAGES = "ページの回転"
+UNDO_FAILED = ("元に戻す（またはやり直し）を最後まで行えませんでした。"
+               "操作の履歴は消去しました。今の内容を確かめてから、別の名前で保存してください。")
 
 APP_NAME = "PDF-editor"
 
@@ -33,7 +35,8 @@ REDO_PREFIX = "やり直し"
 OPEN_DIALOG_TITLE = "PDF を開く"
 OPEN_DIALOG_FILTER = "PDF ファイル (*.pdf)"
 EMPTY_HINT = "ここに PDF ファイルをドロップするか、ファイルメニューから開いてください"
-SIGNED_NOTICE = "この PDF には電子署名があります。編集して保存すると署名は無効になります。"
+OPEN_SHOW_FAILED = "「{name}」を表示できません。PDF ファイルが壊れている可能性があります。"
+SIGNED_NOTICE ="この PDF には電子署名があります。編集して保存すると署名は無効になります。"
 
 # ページ一覧と挿入
 PAGES_DOCK_TITLE = "ページ"
@@ -65,4 +68,7 @@ BUTTON_SAVE_ELSEWHERE = "別の場所に保存"
 ERROR_TITLE = "エラー"
 INFO_TITLE = "お知らせ"
 FATAL_TITLE = "予期しないエラー"
-FATAL_TEXT = "予期しないエラーが発生しました。\n詳細はログに記録されました:\n{log_path}"
+FATAL_TEXT = "予期しないエラーが発生しました。"
+STARTUP_FAILED_TEXT = "PDF-editor を起動できませんでした。"
+FATAL_LOG_AT = "詳細はログに記録されました:\n{log_path}"
+FATAL_NO_LOG = "ログファイルを作れなかったため、詳細は記録されていません。"

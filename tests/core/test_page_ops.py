@@ -31,9 +31,9 @@ def test_reorder_remaps_toc_targets(toc_links_pdf):
     assert [t[2] for t in d.fitz.get_toc()] == [5, 4, 2]
 
 
-def test_delete_returns_restorable_bytes(big_pdf):
+def test_delete_returns_restorable_pages(big_pdf):
     d = PdfDocument.open(big_pdf(5)); removed = d.delete_pages([1, 3]); assert labels(d) == [1, 3, 5]
-    d.insert_from_bytes(removed, 1); assert labels(d) == [1, 2, 4, 3, 5]
+    d.restore_pages(removed); assert labels(d) == [1, 2, 3, 4, 5]
 
 
 def test_cannot_delete_all_pages(simple_pdf):
@@ -44,7 +44,7 @@ def test_cannot_delete_all_pages(simple_pdf):
 
 def test_delete_empty_is_noop(simple_pdf):
     d = PdfDocument.open(simple_pdf)
-    assert d.delete_pages([]) == b"" and d.page_count == 3
+    assert d.delete_pages([]) is None and d.page_count == 3
 
 
 def test_delete_bad_index_leaves_document_unchanged(big_pdf):

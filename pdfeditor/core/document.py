@@ -5,7 +5,8 @@ from pathlib import Path
 
 import pymupdf
 
-from pdfeditor.core import errors, safe_save
+from pdfeditor.core import errors, page_detach, safe_save
+from pdfeditor.core.page_detach import DetachedPages
 
 _PERM_OWNER_BIT = 4  # authenticate() の戻り値で、権限パスワード一致を示すビット
 
@@ -16,40 +17,55 @@ PAGE_SIZES: dict[str, tuple[float, float]] = {
 }
 
 
+def _not_a_pdf(name: str) -> errors.NotAPdfError:
+    return errors.NotAPdfError(f"{name}を開けません。PDF ファイルではないか、壊れています。")
+
+
 def _open_authenticated(
     data: bytes, name: str, password: str | None, *, require_edit: bool
 ) -> pymupdf.Document:
     """バイト列を PDF として開き、パスワードを確認する。失敗時は閉じて例外を投げる。
-    require_edit=False なら、編集が制限された PDF も開く（読み取るだけの用途）。"""
+    require_edit=False なら、編集が制限された PDF も開く（読み取るだけの用途）。
+    PyMuPDF のどんな失敗（ページ数が読めない壊れた PDF、メモリ不足など）も NotAPdfError にする。"""
     try:
         doc = pymupdf.open(stream=data, filetype="pdf")
-    except Exception as exc:
-        raise errors.NotAPdfError(
-            f"{name}を開けません。PDF ファイルではないか、壊れています。"
-        ) from exc
+    except Exception as exc:  # MemoryError も含む
+        raise _not_a_pdf(name) from exc
 
     try:
-        owner_ok = False
-        if doc.needs_pass:
-            if password is None:
-                raise errors.PasswordRequiredError(f"{name}を開くにはパスワードが必要です。")
-            result = doc.authenticate(password)
-            if not result:
-                raise errors.WrongPasswordError("パスワードが違います。")
-            owner_ok = bool(result & _PERM_OWNER_BIT)
-        elif password is not None:
-            owner_ok = bool(doc.authenticate(password) & _PERM_OWNER_BIT)
-
-        if doc.page_count == 0:
-            raise errors.NotAPdfError(f"{name}を開けません。PDF ファイルが壊れています。")
-        if require_edit and not owner_ok and not doc.permissions & pymupdf.PDF_PERM_MODIFY:
-            raise errors.OwnerPasswordRequiredError(
-                f"{name}は編集が制限されています。"
-                "権限パスワード（編集用のパスワード）を入力してください。"
-            )
+        return _check_opened(doc, name, password, require_edit=require_edit)
+    except errors.PdfEditorError:
+        doc.close()
+        raise
+    except Exception as exc:
+        doc.close()
+        raise _not_a_pdf(name) from exc
     except BaseException:
         doc.close()
         raise
+
+
+def _check_opened(
+    doc: pymupdf.Document, name: str, password: str | None, *, require_edit: bool
+) -> pymupdf.Document:
+    owner_ok = False
+    if doc.needs_pass:
+        if password is None:
+            raise errors.PasswordRequiredError(f"{name}を開くにはパスワードが必要です。")
+        result = doc.authenticate(password)
+        if not result:
+            raise errors.WrongPasswordError("パスワードが違います。")
+        owner_ok = bool(result & _PERM_OWNER_BIT)
+    elif password is not None:
+        owner_ok = bool(doc.authenticate(password) & _PERM_OWNER_BIT)
+
+    if doc.page_count == 0:
+        raise errors.NotAPdfError(f"{name}を開けません。PDF ファイルが壊れています。")
+    if require_edit and not owner_ok and not doc.permissions & pymupdf.PDF_PERM_MODIFY:
+        raise errors.OwnerPasswordRequiredError(
+            f"{name}は編集が制限されています。"
+            "権限パスワード（編集用のパスワード）を入力してください。"
+        )
     return doc
 
 
@@ -72,16 +88,33 @@ class RenderedPage:
     samples: bytes
 
 
+def absolute_path(path: Path) -> Path:
+    """作業フォルダが変わっても同じファイルを指すよう、絶対パスにする（シンボリックリンクは
+    たどらない。たどれない時も失敗しない）。"""
+    path = Path(path)
+    try:
+        return path.resolve()
+    except OSError:
+        return path.absolute()
+
+
 class PdfDocument:
-    def __init__(self, fitz_doc: pymupdf.Document, path: Path | None):
+    def __init__(self, fitz_doc: pymupdf.Document, path: Path | None,
+                 password: str | None = None):
         self.fitz = fitz_doc
-        self.path = path
+        self.path = absolute_path(path) if path is not None else None
         self.lock = threading.RLock()
         self.backup_done = False  # この文書で上書き用バックアップを作ったか
+        # 開いた時のパスワード。保存時に、暗号化を保ったまま写しを作り直すのに使う。
+        # 記録やログには出さない。
+        self._password = password
+
+    def __repr__(self) -> str:  # パスワードを表示しない
+        return f"PdfDocument(path={self.path!r})"
 
     @classmethod
     def open(cls, path: Path, password: str | None = None) -> "PdfDocument":
-        path = Path(path)
+        path = absolute_path(path)
         try:
             data = path.read_bytes()  # ファイルを掴みっぱなしにしない
         except OSError as exc:
@@ -89,7 +122,7 @@ class PdfDocument:
                 f"「{path.name}」を開けません。ファイルが見つからないか、読み取れません。"
             ) from exc
         doc = _open_authenticated(data, f"「{path.name}」", password, require_edit=True)
-        return cls(doc, path)
+        return cls(doc, path, password)
 
     @property
     def page_count(self) -> int:
@@ -98,7 +131,10 @@ class PdfDocument:
 
     @property
     def is_signed(self) -> bool:
-        return self.fitz.get_sigflags() == 3
+        """SigFlags の SignaturesExist（ビット 1）が立っていれば署名済みとみなす。"""
+        with self.lock:
+            flags = self.fitz.get_sigflags()  # AcroForm がなければ -1
+        return flags > 0 and bool(flags & 1)
 
     def _page(self, index: int) -> pymupdf.Page:
         """呼び出し側が self.lock を保持していること。Page は保持せず毎回取得する。"""
@@ -137,79 +173,69 @@ class PdfDocument:
         if not 0 <= at <= self.fitz.page_count:
             raise IndexError(f"挿入位置が範囲外です: {at}")
 
+    def _permute(self, order: list[int]) -> None:
+        """ページを order（旧ページ番号の順列）の並びにする。lock を保持して呼ぶ。
+        Document.select は AcroForm（フォーム）を消すので使わない。ページの参照を
+        ページツリーの中で動かすだけの move_page なら、フォーム・しおり・リンクの行き先は
+        ページオブジェクトについたまま残る。"""
+        current = list(range(self.fitz.page_count))
+        for k, wanted in enumerate(order):
+            j = current.index(wanted, k)
+            if j != k:
+                self.fitz.move_page(j, k)  # j にあるページを k の前へ
+                current.insert(k, current.pop(j))
+
     def move_pages(self, indices: list[int], to: int) -> None:
         with self.lock:
             self._check_indices(indices)
             self._check_position(to)
             if not indices:
                 return
-            self.fitz.select(page_order_after_move(self.fitz.page_count, indices, to))
+            self._permute(page_order_after_move(self.fitz.page_count, indices, to))
 
     def reorder(self, order: list[int]) -> None:
         """order は旧ページ番号の順列。"""
         with self.lock:
             if sorted(order) != list(range(self.fitz.page_count)):
                 raise ValueError("並べ替えの指定がページ番号の順列になっていません。")
-            self.fitz.select(order)
+            self._permute(order)
 
-    def delete_pages(self, indices: list[int]) -> bytes:
-        """削除したページだけを含む PDF のバイト列（元に戻す用）を返す。"""
+    def delete_pages(self, indices: list[int]) -> DetachedPages | None:
+        """ページを削除し、元に戻すための控え（restore_pages に渡す）を返す。空なら None。
+        ページはページツリーから外すだけで、オブジェクトは文書に残る（保存したファイルには
+        入らない）。外すページのフォーム部品は AcroForm から外す。"""
         with self.lock:
             self._check_indices(indices)
             if not indices:
-                return b""
+                return None
             if len(indices) >= self.fitz.page_count:
                 raise errors.PageOperationError("最後の 1 ページは削除できません。")
-            removed = pymupdf.open()
+            order = sorted(indices)
+            doomed = set(order)
+            keep = [i for i in range(self.fitz.page_count) if i not in doomed]
+            page_xrefs = [self._page(i).xref for i in order]
+            widgets = [
+                xref for i in order for xref, kind, _ in self._page(i).annot_xrefs()
+                if kind == pymupdf.PDF_ANNOT_WIDGET
+            ]
+            before = page_detach.objects_touched_by_delete(self.fitz, keep)
+            removals = page_detach.remove_form_fields(self.fitz, widgets)
             try:
-                for i in sorted(indices):
-                    removed.insert_pdf(self.fitz, from_page=i, to_page=i)
-                data = removed.tobytes()
-            finally:
-                removed.close()
-            self.fitz.delete_pages(indices)
-            return data
+                self.fitz.delete_pages(order)
+            except BaseException:
+                page_detach.restore_form_fields(self.fitz, removals)
+                raise
+            changed = page_detach.only_changed(self.fitz, before)
+            return DetachedPages(order, page_xrefs, removals, changed)
 
-    def capture_links(self, indices: list[int]) -> dict[int, list[dict]]:
-        """削除の取り消し用に、削除で変わりうるページ（削除するページと、削除するページへ
-        リンクしているページ）のリンクを、ページ番号つきで控える。削除の前に呼ぶ。"""
+    def restore_pages(self, detached: DetachedPages) -> None:
+        """delete_pages で外したページを、同じオブジェクトのまま元の位置に戻す。フォーム部品、
+        ほかのページから削除ページへのリンク、しおりの行き先も削除前の形に戻す。
+        delete_pages の後に行った変更をすべて元に戻してから呼ぶこと（元に戻すの順序）。"""
         with self.lock:
-            self._check_indices(indices)
-            doomed = set(indices)
-            out: dict[int, list[dict]] = {}
-            for i in range(self.fitz.page_count):
-                links = self._page(i).get_links()
-                if i in doomed or any(
-                    link.get("kind") == pymupdf.LINK_GOTO and link.get("page") in doomed
-                    for link in links
-                ):
-                    out[i] = [dict(link) for link in links]
-            return out
-
-    def restore_deleted_pages(
-        self, data: bytes, indices: list[int], links: dict[int, list[dict]],
-        toc: list | None = None,
-    ) -> None:
-        """delete_pages が返した data のページを元の位置 indices に戻し、
-        capture_links で控えたリンクとしおり toc を元通りにする。"""
-        with self.lock:
-            src = pymupdf.open(stream=data, filetype="pdf")
-            try:
-                # 元の位置の小さい順に 1 ページずつ戻せば、非連続の選択でも元の並びになる
-                for k, index in enumerate(sorted(indices)):
-                    self.fitz.insert_pdf(src, from_page=k, to_page=k, start_at=index)
-            finally:
-                src.close()
-            # 戻した後のページ番号は削除前と同じなので、控えたリンクをそのまま付け直せる
-            for index, saved in links.items():
-                page = self._page(index)
-                for existing in page.get_links():
-                    page.delete_link(existing)
-                for link in saved:
-                    link = {k: v for k, v in link.items() if k not in ("xref", "id")}
-                    page.insert_link(link)
-            if toc is not None:
-                self.fitz.set_toc(toc)
+            page_detach.insert_page_objects(self.fitz, detached.indices, detached.page_xrefs)
+            page_detach.restore_form_fields(self.fitz, detached.removals)
+            page_detach.restore_objects(self.fitz, detached.changed_objects)
 
     def insert_blank(self, at: int, width: float, height: float) -> None:
         with self.lock:
@@ -264,8 +290,20 @@ class PdfDocument:
                 page.set_rotation((page.rotation + delta) % 360)
 
     def to_bytes(self) -> bytes:
+        """保存するバイト列。パスワードと編集制限は元のまま残す（PDF_ENCRYPT_KEEP）。
+
+        不要オブジェクトの掃除（garbage）は、生きている文書ではなく写しで行う。生きている文書で
+        掃除すると、削除を元に戻すために残してあるページ（page_detach）が消えるため。"""
+        keep = pymupdf.PDF_ENCRYPT_KEEP
         with self.lock:
-            return self.fitz.tobytes(garbage=3, deflate=True)
+            raw = self.fitz.tobytes(encryption=keep)  # garbage なし: 文書の中身を変えない
+        copy = pymupdf.open(stream=raw, filetype="pdf")
+        try:
+            if copy.needs_pass:
+                copy.authenticate(self._password or "")
+            return copy.tobytes(garbage=3, deflate=True, encryption=keep)
+        finally:
+            copy.close()
 
     def save(self, target: Path | None = None) -> None:
         """target が None または現在のパスと同じなら上書き（初回のみバックアップ）。
@@ -273,7 +311,7 @@ class PdfDocument:
         with self.lock:  # バイト列とページ数を同じ瞬間の状態で取る
             data = self.to_bytes()
             pages = self.fitz.page_count
-        dest = Path(target) if target is not None else self.path
+        dest = absolute_path(target) if target is not None else self.path
         if dest is None:
             raise errors.SaveFailedError("保存先が指定されていません。", "other")
         overwrite = self.path is not None and dest == self.path

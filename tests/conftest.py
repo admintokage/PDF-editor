@@ -62,6 +62,63 @@ def toc_links_pdf(tmp_path) -> Path:
     return path
 
 
+def _add_text_field(page: pymupdf.Page, name: str, value: str, y: float = 200) -> int:
+    widget = pymupdf.Widget()
+    widget.field_type = pymupdf.PDF_WIDGET_TYPE_TEXT
+    widget.field_name = name
+    widget.field_value = value
+    widget.rect = pymupdf.Rect(72, y, 300, y + 30)
+    return page.add_widget(widget).xref
+
+
+def make_form(path: Path) -> Path:
+    """5 ページ（"Page N"）のフォーム PDF。実際の PDF に近づけるため AcroForm は間接参照にする。
+    - 1 ページ目: テキスト "name"="val-name"、注釈とリンク（URI）
+    - 2 ページ目: チェックボックス "chk"=オン
+    - 3 ページ目と 5 ページ目: 1 つのフィールド "shared"="共有" のウィジェット 2 つ（親と Kids）
+    - 4 ページ目: テキスト "other"="val-other"
+    """
+    doc = pymupdf.open()
+    for i in range(5):
+        _text_page(doc, i + 1)
+    _add_text_field(doc[0], "name", "val-name")
+    doc[0].add_text_annot(pymupdf.Point(400, 300), "注釈")
+    doc[0].insert_link({"kind": pymupdf.LINK_URI, "from": pymupdf.Rect(10, 10, 50, 50),
+                        "uri": "https://example.com/"})
+    box = pymupdf.Widget()
+    box.field_type = pymupdf.PDF_WIDGET_TYPE_CHECKBOX
+    box.field_name = "chk"
+    box.field_value = True
+    box.rect = pymupdf.Rect(72, 300, 90, 318)
+    doc[1].add_widget(box)
+    kid_a = _add_text_field(doc[2], "shared_a", "共有")
+    kid_b = _add_text_field(doc[4], "shared_b", "共有", y=400)
+    _add_text_field(doc[3], "other", "val-other")
+
+    # shared_a / shared_b を、親 "shared" の Kids にまとめる
+    cat = doc.pdf_catalog()
+    fields = doc.xref_get_key(cat, "AcroForm/Fields")[1]
+    parent = doc.get_new_xref()
+    doc.update_object(parent, f"<</T(shared)/FT/Tx/V(共有)/Kids[{kid_a} 0 R {kid_b} 0 R]>>")
+    for kid in (kid_a, kid_b):
+        doc.xref_set_key(kid, "Parent", f"{parent} 0 R")
+        doc.xref_set_key(kid, "T", "null")
+        doc.xref_set_key(kid, "FT", "null")
+        doc.xref_set_key(kid, "V", "null")
+    fields = fields.replace(f"{kid_a} 0 R", f"{parent} 0 R").replace(f" {kid_b} 0 R", "")
+    acro = doc.get_new_xref()
+    doc.update_object(acro, f"<</Fields{fields}/DA(/Helv 0 Tf 0 g)>>")
+    doc.xref_set_key(cat, "AcroForm", f"{acro} 0 R")
+    doc.save(path)
+    doc.close()
+    return path
+
+
+@pytest.fixture
+def form_pdf(tmp_path) -> Path:
+    return make_form(tmp_path / "form.pdf")
+
+
 @pytest.fixture
 def user_pw_pdf(tmp_path) -> Path:
     doc = pymupdf.open()
@@ -96,6 +153,18 @@ def signed_flag_pdf(tmp_path) -> Path:
     root = doc.pdf_catalog()
     doc.xref_set_key(root, "AcroForm", "<</Fields[]/SigFlags 3>>")
     path = tmp_path / "signed_flag.pdf"
+    doc.save(path)
+    doc.close()
+    return path
+
+
+@pytest.fixture
+def sigflags_1_pdf(tmp_path) -> Path:
+    """SigFlags=1（SignaturesExist だけ）。署名済みとして扱う。"""
+    doc = pymupdf.open()
+    _text_page(doc, 1)
+    doc.xref_set_key(doc.pdf_catalog(), "AcroForm", "<</Fields[]/SigFlags 1>>")
+    path = tmp_path / "sigflags_1.pdf"
     doc.save(path)
     doc.close()
     return path

@@ -104,6 +104,68 @@ def test_page_count_mismatch_is_verify_failed(simple_pdf, monkeypatch):
     assert not list(simple_pdf.parent.glob("*.tmp-*.pdf"))
 
 
+def _flaky_replace(monkeypatch, failures: int):
+    """最初の failures 回は PermissionError を投げる os.replace。呼ばれた回数と待ち時間を返す。"""
+    import os
+    from pdfeditor.core import safe_save
+
+    real = os.replace
+    calls, sleeps = [], []
+
+    def fake(src, dst):
+        calls.append((src, dst))
+        if len(calls) <= failures:
+            raise PermissionError(13, "in use by another process")
+        real(src, dst)
+    monkeypatch.setattr(os, "replace", fake)
+    monkeypatch.setattr(safe_save, "_sleep", sleeps.append)
+    return calls, sleeps
+
+
+def test_transient_lock_on_replace_is_retried(simple_pdf, monkeypatch):
+    calls, sleeps = _flaky_replace(monkeypatch, failures=2)
+    d = PdfDocument.open(simple_pdf); d.rotate_by([0], 90); d.save(simple_pdf.with_name("o.pdf"))
+    assert len(calls) == 3 and sleeps == [0.1, 0.1]
+    assert PdfDocument.open(simple_pdf.with_name("o.pdf")).page_rotation(0) == 90
+
+
+def test_transient_lock_on_backup_replace_is_retried(simple_pdf, monkeypatch):
+    original = simple_pdf.read_bytes()
+    calls, _ = _flaky_replace(monkeypatch, failures=2)  # 最初の置き換えはバックアップ
+    d = PdfDocument.open(simple_pdf); d.save()
+    assert d.backup_done and len(calls) == 4
+    assert simple_pdf.with_name(simple_pdf.stem + ".bak.pdf").read_bytes() == original
+
+
+def test_persistent_lock_gives_up_as_locked(simple_pdf, monkeypatch):
+    original = simple_pdf.read_bytes()
+    calls, sleeps = _flaky_replace(monkeypatch, failures=10**6)
+    with pytest.raises(errors.SaveFailedError) as e:
+        PdfDocument.open(simple_pdf).save(simple_pdf.with_name("o.pdf"))
+    assert e.value.reason == "locked" and len(calls) == 5 and len(sleeps) == 4
+    assert simple_pdf.read_bytes() == original and not simple_pdf.with_name("o.pdf").exists()
+    assert not list(simple_pdf.parent.glob("*.tmp-*.pdf"))
+
+
+def test_relative_path_survives_working_directory_change(simple_pdf, tmp_path, monkeypatch):
+    """相対パスで開いても絶対パスで覚える。作業フォルダが変わっても同じファイルに上書きする。"""
+    monkeypatch.chdir(simple_pdf.parent)
+    d = PdfDocument.open(simple_pdf.name)
+    assert d.path == simple_pdf.resolve() and d.path.is_absolute()
+    other = tmp_path / "elsewhere"; other.mkdir(); monkeypatch.chdir(other)
+    d.rotate_by([0], 90); d.save()
+    assert PdfDocument.open(simple_pdf).page_rotation(0) == 90 and not (other / "simple.pdf").exists()
+    assert d.backup_done  # 上書きとして扱われ、バックアップができた
+
+
+def test_save_as_relative_path_then_overwrite_is_same_file(simple_pdf, tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    d = PdfDocument.open(simple_pdf); d.save("copy.pdf")
+    assert d.path == (tmp_path / "copy.pdf").resolve()
+    d.save(str(tmp_path / "copy.pdf"))  # 同じファイルを絶対パスで指定: 上書き扱い
+    assert d.backup_done
+
+
 def test_fsync_failure_keeps_original(simple_pdf, monkeypatch):
     original = simple_pdf.read_bytes()
 

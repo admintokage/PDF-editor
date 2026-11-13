@@ -1,24 +1,34 @@
 """ページ操作を「元に戻す」に対応させる QUndoCommand 群。"""
+import logging
 from collections.abc import Callable
 
+from PySide6.QtCore import QTimer
 from PySide6.QtGui import QUndoCommand, QUndoStack
 
 from pdfeditor.core.document import PdfDocument, page_order_after_move
-from pdfeditor.ui import messages
+from pdfeditor.core.errors import PdfEditorError
+from pdfeditor.ui import dialogs, messages
 
 DocChanged = Callable[[], None]
 UNDO_LIMIT = 50
 
+log = logging.getLogger(__name__)
+
 
 class _PageCommand(QUndoCommand):
     """redo/undo の共通処理。サブクラスは _apply / _revert を実装する。
-    _apply が例外を投げたら文書は変わっていない（core の保証）。"""
+    _apply が例外を投げたら文書は変わっていない（core の保証）。
+
+    元に戻す/やり直しの途中で例外が出ても、PySide はそれを握りつぶしてスタックの位置だけを
+    進めてしまう。そこで例外はここで受け止め、利用者に知らせ、履歴を消す（履歴と文書が
+    食い違ったまま操作を続けないように）。"""
 
     def __init__(self, text: str, doc: PdfDocument, doc_changed: DocChanged | None):
         super().__init__(text)
         self._doc = doc
         self._doc_changed = doc_changed
         self._preapplied = False
+        self._stack: QUndoStack | None = None  # _UndoStack.push が設定する
 
     def _apply(self) -> None:
         raise NotImplementedError
@@ -34,12 +44,45 @@ class _PageCommand(QUndoCommand):
         if self._preapplied:  # push_command が実行済み
             self._preapplied = False
         else:
-            self._apply()
+            self._guarded(self._apply)
+            return
         self._notify()
 
     def undo(self) -> None:
-        self._revert()
+        self._guarded(self._revert)
+
+    def _guarded(self, step: Callable[[], None]) -> None:
+        try:
+            step()
+        except Exception as exc:  # noqa: BLE001 - PySide に握りつぶされる前に受け止める
+            log.exception("page command failed during undo/redo")
+            self._notify()  # 途中まで変わったかもしれないので、表示を読み直させる
+            _report_failure(self._stack, exc)
+            return
         self._notify()
+
+
+def _report_failure(stack: QUndoStack | None, exc: Exception) -> None:
+    """履歴を消して、利用者に知らせる。スタックの処理中に消すと危ないので、後で行う。"""
+    err = exc if isinstance(exc, PdfEditorError) else PdfEditorError(messages.UNDO_FAILED)
+    parent = stack.parent() if stack is not None else None
+
+    def later() -> None:
+        if stack is not None:
+            stack.clear()
+            stack.resetClean()  # 文書は保存時と違うかもしれない: 未保存の印を残す
+        dialogs.show_error(parent, err)  # 呼ぶ時にモジュールから引く（テストで差し替える）
+
+    QTimer.singleShot(0, later)
+
+
+class _UndoStack(QUndoStack):
+    """積んだコマンドに自分を覚えさせる（失敗した時に履歴を消すため）。"""
+
+    def push(self, command: QUndoCommand) -> None:
+        if isinstance(command, _PageCommand):
+            command._stack = self
+        super().push(command)
 
 
 class MovePagesCommand(_PageCommand):
@@ -66,21 +109,15 @@ class DeletePagesCommand(_PageCommand):
     def __init__(self, doc, indices: list[int], doc_changed: DocChanged | None = None):
         super().__init__(messages.CMD_DELETE_PAGES, doc, doc_changed)
         self._indices = sorted(indices)
-        self._removed = b""
-        self._toc: list = []
-        self._links: dict[int, list[dict]] = {}
+        self._detached = None  # 削除したページの控え。ページの実体は文書に残っている
 
     def _apply(self) -> None:
-        with self._doc.lock:
-            toc = self._doc.fitz.get_toc(simple=False)
-            links = self._doc.capture_links(self._indices)  # 不正ならここで例外
-            self._removed = self._doc.delete_pages(self._indices)
-            self._toc, self._links = toc, links
+        self._detached = self._doc.delete_pages(self._indices)  # 不正ならここで例外
 
     def _revert(self) -> None:
-        if not self._removed:
-            return
-        self._doc.restore_deleted_pages(self._removed, self._indices, self._links, self._toc)
+        if self._detached is not None:
+            self._doc.restore_pages(self._detached)
+            self._detached = None
 
 
 class InsertBlankCommand(_PageCommand):
@@ -129,7 +166,7 @@ class RotatePagesCommand(_PageCommand):
 
 
 def make_undo_stack(parent) -> QUndoStack:
-    stack = QUndoStack(parent)
+    stack = _UndoStack(parent)
     stack.setUndoLimit(UNDO_LIMIT)
     return stack
 
