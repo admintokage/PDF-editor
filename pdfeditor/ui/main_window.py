@@ -91,8 +91,11 @@ class MainWindow(QMainWindow):
         self.page_menu = bar.addMenu(messages.MENU_PAGE)
 
         self.view_menu = bar.addMenu(messages.MENU_VIEW)
+        # JIS 配列では「+」に Shift が要るので、Ctrl+; と Ctrl+= でも拡大する（表示は Ctrl++）
         self.zoom_in_action = self._view_action(
             messages.ACTION_ZOOM_IN, "Ctrl++", self.page_view.zoom_in)
+        self.zoom_in_action.setShortcuts(
+            [QKeySequence("Ctrl++"), QKeySequence("Ctrl+;"), QKeySequence("Ctrl+=")])
         self.zoom_out_action = self._view_action(
             messages.ACTION_ZOOM_OUT, "Ctrl+-", self.page_view.zoom_out)
         self.fit_width_action = self._view_action(

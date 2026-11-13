@@ -5,7 +5,7 @@ from PySide6.QtGui import QWheelEvent
 from PySide6.QtWidgets import QApplication
 
 from pdfeditor.core.document import PdfDocument
-from pdfeditor.ui.page_view import PageView
+from pdfeditor.ui.page_view import MAX_RENDER_PIXELS, PageView
 from pdfeditor.ui.render_service import RenderService
 from tests.helpers import make_view
 
@@ -199,13 +199,33 @@ def test_mixed_sizes_laid_out_individually(qtbot, mixed_size_pdf):
         assert abs(lower.center().x() - upper.center().x()) <= 1
 
 
-def test_requests_use_device_pixel_ratio(qtbot, simple_pdf):
+@pytest.mark.parametrize("zoom", [1.0, 1.5, 2.0])
+def test_requests_use_device_pixel_ratio(qtbot, simple_pdf, zoom):
     v = make_view(qtbot, simple_pdf)
+    v.set_zoom(0.5)
+    qtbot.wait(150)
     asked = _record_requests(v.service)
-    v.set_zoom(1.5)
+    v.set_zoom(zoom)
     qtbot.waitUntil(lambda: bool(asked))
-    expected = round(1.5 * v.devicePixelRatioF(), 4)
+    expected = round(zoom * v.devicePixelRatioF(), 4)
     assert {z for _, z in asked} == {expected}
+
+
+def test_high_zoom_render_size_is_capped(qtbot, big_pdf):
+    v = make_view(qtbot, big_pdf(5))
+    asked = _record_requests(v.service)
+    v.set_zoom(8.0)
+    qtbot.waitUntil(lambda: bool(asked))
+    v.verticalScrollBar().setValue(v.page_rect(1).toRect().top() + v.verticalScrollBar().value())
+    qtbot.waitUntil(lambda: set(v.visible_pages()) <= set(v._images), timeout=15000)
+    for i, z in asked:
+        w, h = v.doc.page_size(i)
+        assert w * z * h * z <= MAX_RENDER_PIXELS and z == round(z, 4)
+    assert z < round(8.0 * v.devicePixelRatioF(), 4)  # 実際に下げている
+    held = sum(img.sizeInBytes() for _, img in v._images.values())
+    assert held < 3 * MAX_RENDER_PIXELS * 4
+    for _, img in v._images.values():
+        assert img.width() * img.height() <= MAX_RENDER_PIXELS * 1.01  # 端数の切り上げ分
 
 
 def test_zoom_steps_are_debounced(qtbot, big_pdf):

@@ -128,6 +128,7 @@ def test_view_menu_shortcuts_and_enabling(qtbot, simple_pdf):
     w = MainWindow(); qtbot.addWidget(w)
     actions = [w.zoom_in_action, w.zoom_out_action, w.fit_width_action, w.fit_page_action]
     assert [a.shortcut().toString() for a in actions] == ["Ctrl++", "Ctrl+-", "Ctrl+1", "Ctrl+0"]
+    assert [s.toString() for s in w.zoom_in_action.shortcuts()] == ["Ctrl++", "Ctrl+;", "Ctrl+="]
     assert w.view_menu.actions() == actions
     assert not any(a.isEnabled() for a in actions)
     w.open_path(simple_pdf)

@@ -25,6 +25,9 @@ MAX_ZOOM = 8.0
 ZOOM_STEP = 1.25
 RENDER_DELAY_MS = 80  # 連続した拡大・縮小やリサイズの間は描画を頼まない
 ARROW_STEP = 40
+# 1 ページの描画の画素数の上限（RGB で約 48MB）。高倍率でメモリを使い過ぎないため。
+# 超える倍率では収まる倍率で描いて引き伸ばす（段階 1 ではぼやけを許容する）
+MAX_RENDER_PIXELS = 16_000_000
 
 _BACKGROUND = QColor(128, 128, 128)
 _PAPER = QColor(255, 255, 255)
@@ -323,14 +326,23 @@ class PageView(QAbstractScrollArea):
         self._render_zoom = self._current_render_zoom()
         self.service.cancel_except(near)
         for index in near - set(visible):
-            self.service.request(index, self._render_zoom, priority=1)
+            self.service.request(index, self._page_render_zoom(index), priority=1)
         for index in reversed(visible):  # 同じ優先度は後から頼んだ方が先
-            self.service.request(index, self._render_zoom, priority=0)
+            self.service.request(index, self._page_render_zoom(index), priority=0)
+
+    def _page_render_zoom(self, index: int) -> float:
+        """ページ index を頼む倍率。画素数が MAX_RENDER_PIXELS を超えるなら、収まる最大の
+        倍率に下げる（引き伸ばして出すのでぼやけるが、メモリを使い過ぎない）。
+        小数 4 桁で切り捨て、毎回同じ値になるようにする（キャッシュのキー）。"""
+        w, h = self._sizes[index]
+        if w * h * self._render_zoom ** 2 <= MAX_RENDER_PIXELS:
+            return self._render_zoom
+        return math.floor(math.sqrt(MAX_RENDER_PIXELS / (w * h)) * 10000) / 10000
 
     def _on_rendered(self, index: int, zoom: float, image: QImage) -> None:
         if index not in self._near or not 0 <= index < len(self._sizes):
             return
-        if zoom != self._render_zoom and index in self._images:
+        if zoom != self._page_render_zoom(index) and index in self._images:
             return  # 頼み直す前の倍率の結果。手元の画像で足りている
         self._images[index] = (zoom, image)
         self.viewport().update(self.page_rect(index).toAlignedRect().adjusted(-1, -1, 1, 1))
