@@ -90,6 +90,24 @@ def test_offscreen_and_windows_platform_plugins_bundled():
 def test_license_and_readme_at_top_of_folder():
     assert (APP_DIR / "LICENSE").is_file()
     assert (APP_DIR / "README.txt").is_file()
+    notices = (APP_DIR / "THIRD-PARTY-NOTICES.txt").read_text(encoding="utf-8")
+    assert all(name in notices for name in ("PyMuPDF", "Artifex", "PySide6", "LGPL-3.0", "Python"))
+    with zipfile.ZipFile(DIST / "PDF-editor.zip") as z:
+        assert "PDF-editor/THIRD-PARTY-NOTICES.txt" in z.namelist()
+
+
+@pytest.mark.dist
+def test_qt_japanese_translations_bundled_and_used(tmp_path):
+    folder = APP_DIR / "_internal" / "PySide6" / "translations"
+    assert (folder / "qtbase_ja.qm").is_file()
+    code, text = _run_app(APP_EXE, "--translation-check", result_file=tmp_path / "r.txt")
+    assert (code, text) == (0, "キャンセル")
+
+
+@pytest.mark.dist
+def test_no_tls_libraries_bundled():
+    names = {p.name.lower() for p in APP_DIR.rglob("*")}
+    assert not names & {"_ssl.pyd", "libssl-3-x64.dll", "libcrypto-3-x64.dll"}
 
 
 @pytest.mark.dist

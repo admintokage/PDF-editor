@@ -41,6 +41,7 @@ if ($Target -eq "app") {
     # 利用者に見せる説明とライセンスを、展開したフォルダの直下に置く
     Copy-Item (Join-Path $root "LICENSE") $outDir
     Copy-Item (Join-Path $root "packaging\README.txt") $outDir
+    Copy-Item (Join-Path $root "packaging\THIRD-PARTY-NOTICES.txt") $outDir
 }
 
 # Compress-Archive は古い PowerShell でパス区切りが円記号になるため、.NET で zip にする。

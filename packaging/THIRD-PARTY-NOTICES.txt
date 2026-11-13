@@ -1,0 +1,43 @@
+PDF-editor に含まれる他のソフトウェア（第三者ソフトウェアのお知らせ）
+======================================================================
+
+PDF-editor 本体は GNU Affero General Public License v3.0 (AGPL-3.0) で配布しています
+（全文は同じフォルダの LICENSE）。配布物（PDF-editor フォルダ）には、次のソフトウェアが
+含まれています。それぞれの著作権は各権利者にあり、各ライセンスに従って再配布しています。
+
+
+1. PyMuPDF / MuPDF（PDF の読み込み・描画・保存）
+   - 版: PyMuPDF 1.28.2（MuPDF 1.28 系を内蔵）
+   - 権利者: Artifex Software, Inc.
+   - ライセンス: GNU Affero General Public License v3.0 (AGPL-3.0)
+     （全文は同じフォルダの LICENSE と同じものです）
+   - 入手先: https://github.com/pymupdf/PyMuPDF / https://mupdf.com/
+   - 配布物の場所: _internal\pymupdf
+
+2. Qt 6 / PySide6 / Shiboken6（画面の部品）
+   - 版: Qt 6.12.0 / PySide6-Essentials 6.12.0
+   - 権利者: The Qt Company Ltd. ほか
+   - ライセンス: GNU Lesser General Public License v3.0 (LGPL-3.0)
+     全文: https://www.gnu.org/licenses/lgpl-3.0.html
+   - Qt のソースコードの入手先: https://download.qt.io/official_releases/qt/6.12/
+     PySide6 / Shiboken6 のソースコード: https://code.qt.io/cgit/pyside/pyside-setup.git/
+     （いずれも上記の版のもの）
+   - 置き換え（再リンク）について: Qt と PySide6 は、本体とは別のファイル
+     （_internal\PySide6 フォルダの Qt6*.dll、pyside6*.dll、shiboken6 フォルダなど）として
+     入っています。互換性のある版を自分で用意して、これらのファイルを置き換えて使うことが
+     できます。PDF-editor 本体のソースコードは https://github.com/admintokage/PDF-editor
+     にあります。
+   - Qt の日本語訳（_internal\PySide6\translations の qtbase_ja.qm、qt_ja.qm）も
+     Qt の一部として同じライセンスで含めています。
+
+3. Python（実行環境）
+   - 版: Python 3.12
+   - 権利者: Python Software Foundation
+   - ライセンス: Python Software Foundation License（PSF License）
+     全文: https://docs.python.org/3/license.html
+   - 入手先: https://www.python.org/
+
+4. PyInstaller の起動部（PDF-editor.exe の起動処理）
+   - 権利者: PyInstaller Development Team
+   - ライセンス: GNU General Public License v2.0 以降（起動部の再配布を認める例外付き）
+   - 入手先: https://pyinstaller.org/ / https://github.com/pyinstaller/pyinstaller

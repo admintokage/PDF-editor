@@ -26,12 +26,13 @@ Windows で使える、無料の PDF エディタです。PDF の中身を、手
 ## 安心して使うために
 
 - PDF の内容を外部に送ることはありません。通信は一切行わず、すべてお使いの PC の中で処理します。
-- 上書き保存するとき、最初の 1 回だけ元のファイルを `ファイル名.bak.pdf` として残します。
+- PDF を開いてから最初に上書き保存するとき、その時点の元ファイルを `ファイル名.bak.pdf` として残します（すでに同じ名前のバックアップがある場合は置き換えます）。
+- パスワードや編集の制限が付いた PDF は、保存した後も同じパスワードと制限のままです。
 - 保存に失敗しても、元のファイルは壊れないようにしてあります。
 
 ## ライセンスとソース
 
-GNU Affero General Public License v3.0 (AGPL-3.0)。全文は [LICENSE](LICENSE) にあります。ソースコードはこのリポジトリ（https://github.com/admintokage/PDF-editor ）にあります。
+GNU Affero General Public License v3.0 (AGPL-3.0)。全文は [LICENSE](LICENSE) にあります。ソースコードはこのリポジトリ（https://github.com/admintokage/PDF-editor ）にあります。配布物に含まれる他のソフトウェア（PyMuPDF / MuPDF、PySide6 / Qt、Python）のライセンスは [packaging/THIRD-PARTY-NOTICES.txt](packaging/THIRD-PARTY-NOTICES.txt) にまとめています。
 
 - [要件定義書](docs/superpowers/specs/2026-11-13-pdf-editor-requirements.md)
 
@@ -53,4 +54,4 @@ powershell -ExecutionPolicy Bypass -File packaging/build.ps1 -Target app
 uv run pytest -m dist           # 作った配布物を確かめる（画面は出さない）
 ```
 
-`PDF-editor.exe --self-test <pdf>` は、画面を出さずに PDF を開く・描画・保存を試して終了コードで結果を返します。`--startup-benchmark` は、起動からウィンドウが最初に描かれるまでのミリ秒を出力します。どちらも `--result-file <パス>` を付けると結果をファイルにも書きます。
+`PDF-editor.exe --self-test <pdf>` は、画面を出さずに PDF を開く・描画・保存を試して終了コードで結果を返します。`--startup-benchmark` は、起動からウィンドウが最初に描かれるまでのミリ秒を出力します。`--translation-check` は、Qt の日本語訳が読み込めているか（標準の「キャンセル」ボタンの文言）を出力します。いずれも `--result-file <パス>` を付けると結果をファイルにも書きます。

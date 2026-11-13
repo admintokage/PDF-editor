@@ -26,10 +26,13 @@ UNUSED_QT_MODULES = [
     "Help", "Xml", "Concurrent", "PrintSupport", "Bluetooth", "Nfc", "Positioning", "Sensors",
     "SerialPort", "RemoteObjects", "Scxml", "StateMachine", "TextToSpeech", "3DCore",
 ]
+# 通信をしないので TLS（ssl / OpenSSL）は入れない。hashlib は OpenSSL がなくても
+# Python 内蔵の実装で動く。
+UNUSED_PY_MODULES = ["tkinter", "ssl", "_ssl", "_hashlib"]
 a = Analysis(
     [str(entry)],
     pathex=[str(root)],
-    excludes=["tkinter"] + [f"PySide6.Qt{m}" for m in UNUSED_QT_MODULES],
+    excludes=UNUSED_PY_MODULES + [f"PySide6.Qt{m}" for m in UNUSED_QT_MODULES],
 )
 
 # 本体（app）は PNG / JPEG の画像だけ使う。Qt が自動で拾う不要な DLL・プラグイン・翻訳を外す。
@@ -39,6 +42,7 @@ DROP_BINARIES = (
     "qdirect2d.dll", "qminimal.dll", "qsvg.dll", "qsvgicon.dll", "qicns.dll", "qico.dll", "qtga.dll",
     "qtiff.dll", "qwbmp.dll", "qwebp.dll", "qtuiotouchplugin.dll", "qnetworklistmanager.dll",
     "qcertonlybackend.dll", "qopensslbackend.dll", "qschannelbackend.dll",
+    "_ssl.pyd", "_hashlib.pyd", "libssl-3-x64.dll", "libcrypto-3-x64.dll",
 )
 KEEP_TRANSLATIONS = ("qt_ja.qm", "qtbase_ja.qm")
 
