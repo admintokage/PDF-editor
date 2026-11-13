@@ -3,3 +3,6 @@ dist/
 build/
 __pycache__/
 *.spec.bak
+
+# spike outputs (regenerate with the scripts)
+spikes/text_replace/out/
