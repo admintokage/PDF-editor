@@ -1,5 +1,6 @@
 """PDF 文書の読み込み。Qt には依存しない。"""
 import threading
+from dataclasses import dataclass
 from pathlib import Path
 
 import pymupdf
@@ -7,6 +8,15 @@ import pymupdf
 from pdfeditor.core import errors
 
 _PERM_OWNER_BIT = 4  # authenticate() の戻り値で、権限パスワード一致を示すビット
+
+
+@dataclass(frozen=True)
+class RenderedPage:
+    """描画結果。samples は RGB（アルファなし）で 1 行 stride バイト。"""
+    width: int
+    height: int
+    stride: int
+    samples: bytes
 
 
 class PdfDocument:
@@ -66,6 +76,28 @@ class PdfDocument:
     @property
     def is_signed(self) -> bool:
         return self.fitz.get_sigflags() == 3
+
+    def _page(self, index: int) -> pymupdf.Page:
+        """呼び出し側が self.lock を保持していること。Page は保持せず毎回取得する。"""
+        if not 0 <= index < self.fitz.page_count:
+            raise IndexError(f"ページ番号が範囲外です: {index}")
+        return self.fitz[index]
+
+    def page_size(self, index: int) -> tuple[float, float]:
+        """回転を反映した表示上の (幅, 高さ)。単位はポイント。"""
+        with self.lock:
+            rect = self._page(index).rect
+            return rect.width, rect.height
+
+    def page_rotation(self, index: int) -> int:
+        with self.lock:
+            return self._page(index).rotation
+
+    def render(self, index: int, zoom: float) -> RenderedPage:
+        """zoom 1.0 = 72dpi。"""
+        with self.lock:
+            pix = self._page(index).get_pixmap(matrix=pymupdf.Matrix(zoom, zoom), alpha=False)
+            return RenderedPage(pix.width, pix.height, pix.stride, bytes(pix.samples))
 
     def close(self) -> None:
         with self.lock:
