@@ -37,5 +37,14 @@ if ($LASTEXITCODE -ne 0) {
     exit 1
 }
 
-Compress-Archive -Path $outDir -DestinationPath $zipPath -CompressionLevel Optimal
+if ($Target -eq "app") {
+    # 利用者に見せる説明とライセンスを、展開したフォルダの直下に置く
+    Copy-Item (Join-Path $root "LICENSE") $outDir
+    Copy-Item (Join-Path $root "packaging\README.txt") $outDir
+}
+
+# Compress-Archive は古い PowerShell でパス区切りが円記号になるため、.NET で zip にする。
+# 展開すると $name フォルダ 1 つになるよう、基底フォルダ名を含める。
+Add-Type -AssemblyName System.IO.Compression.FileSystem
+[System.IO.Compression.ZipFile]::CreateFromDirectory($outDir, $zipPath, [System.IO.Compression.CompressionLevel]::Optimal, $true)
 Write-Host "作成しました: $zipPath"

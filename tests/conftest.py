@@ -106,3 +106,21 @@ def big_pdf(tmp_path):
     def factory(pages: int) -> Path:
         return make_big(tmp_path / f"big_{pages}.pdf", pages)
     return factory
+
+
+@pytest.fixture(scope="session")
+def big_pdf_20mb(tmp_path_factory) -> Path:
+    """100 ページ、各ページに乱数のノイズ画像を貼った約 20MB の PDF（圧縮が効かない）。"""
+    import random
+
+    rng = random.Random(20)
+    side = 256  # 256x256 RGB = 196,608 バイト × 100 ページ ≒ 20MB
+    doc = pymupdf.open()
+    for i in range(100):
+        page = _text_page(doc, i + 1)
+        pix = pymupdf.Pixmap(pymupdf.csRGB, side, side, rng.randbytes(side * side * 3), False)
+        page.insert_image(pymupdf.Rect(72, 150, 523, 601), pixmap=pix)
+    path = tmp_path_factory.mktemp("big20") / "big_20mb.pdf"
+    doc.save(path)
+    doc.close()
+    return path

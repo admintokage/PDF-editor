@@ -3,12 +3,15 @@ import logging
 import logging.handlers
 import os
 import sys
+import time
 import traceback
 from pathlib import Path
 
+from PySide6.QtCore import QEvent, QObject, QTimer
 from PySide6.QtWidgets import QApplication, QMessageBox
 
 from pdfeditor import __version__
+from pdfeditor import diagnostics
 from pdfeditor.ui import messages
 
 LOG_NAME = "pdf-editor.log"
@@ -57,10 +60,67 @@ def install_excepthook(log_dir: Path) -> None:
     sys.excepthook = hook
 
 
+class _FirstPaint(QObject):
+    """ウィンドウが最初に描かれた時に callback を呼ぶ（1 回だけ）。"""
+
+    def __init__(self, callback) -> None:
+        super().__init__()
+        self._callback = callback
+        self._done = False
+
+    def eventFilter(self, obj, event) -> bool:
+        if not self._done and event.type() == QEvent.Type.Paint:
+            self._done = True
+            self._callback()
+        return False
+
+
+def _run_startup_benchmark(argv: list[str], result_file: Path | None, entered: float) -> int:
+    from pdfeditor.ui.main_window import MainWindow
+
+    app = QApplication(argv[:1])
+    window = MainWindow()
+    out: list[int] = []
+
+    def painted() -> None:
+        out.append(diagnostics.elapsed_ms_since_process_start(entered))
+        QTimer.singleShot(0, app.quit)
+
+    watcher = _FirstPaint(painted)
+    window.installEventFilter(watcher)
+    window.show()
+    app.exec()
+    window.undo_stack.setClean()
+    window.close()
+    if not out:
+        diagnostics.write_result(result_file, "ERROR: ウィンドウが描かれませんでした")
+        return 1
+    diagnostics.write_result(result_file, str(out[0]))
+    return 0
+
+
 def main(argv: list[str]) -> int:
-    if "--version" in argv[1:]:
+    entered = time.time()
+    args = argv[1:]
+    if "--version" in args:
         print(__version__)
         return 0
+    result_file = diagnostics.option_value(args, "--result-file")
+    result_path = Path(result_file) if result_file else None
+    if "--self-test" in args:
+        os.environ["QT_QPA_PLATFORM"] = "offscreen"  # 何があっても画面は出さない。ダイアログも出さない
+        pdf = diagnostics.option_value(args, "--self-test")
+        try:
+            if pdf is None:
+                raise RuntimeError("--self-test には PDF のパスが必要です")
+            diagnostics.run_self_test(Path(pdf))
+        except Exception as exc:  # noqa: BLE001 - どんな失敗も結果として返す
+            diagnostics.write_result(result_path, f"ERROR: {type(exc).__name__}: {exc}")
+            return 1
+        diagnostics.write_result(result_path, "OK")
+        return 0
+    if "--startup-benchmark" in args:
+        return _run_startup_benchmark(argv, result_path, entered)
     app = QApplication(argv)
     app.setApplicationName(messages.APP_NAME)
     install_excepthook(default_log_dir())
