@@ -1,6 +1,7 @@
 import sys
 
 import pytest
+from PySide6.QtCore import QtMsgType
 
 from pdfeditor.app import install_excepthook
 from pdfeditor.ui import messages
@@ -121,6 +122,59 @@ def test_menus_and_actions(qtbot):
     assert w.redo_action.shortcut().toString() == "Ctrl+Y"
     assert not w.save_action.isEnabled()
     assert w.undo_action.text().startswith(messages.UNDO_PREFIX)
+
+
+def test_view_menu_shortcuts_and_enabling(qtbot, simple_pdf):
+    w = MainWindow(); qtbot.addWidget(w)
+    actions = [w.zoom_in_action, w.zoom_out_action, w.fit_width_action, w.fit_page_action]
+    assert [a.shortcut().toString() for a in actions] == ["Ctrl++", "Ctrl+-", "Ctrl+1", "Ctrl+0"]
+    assert w.view_menu.actions() == actions
+    assert not any(a.isEnabled() for a in actions)
+    w.open_path(simple_pdf)
+    assert all(a.isEnabled() for a in actions)
+
+
+def test_view_actions_drive_page_view(qtbot, simple_pdf):
+    w = MainWindow(); qtbot.addWidget(w); w.show()
+    w.open_path(simple_pdf)
+    w.page_view.set_zoom(1.0)
+    w.zoom_in_action.trigger(); assert abs(w.page_view.zoom - 1.25) < 1e-9
+    w.zoom_out_action.trigger(); assert abs(w.page_view.zoom - 1.0) < 1e-9
+    w.fit_width_action.trigger()
+    vp = w.page_view.viewport()
+    assert abs(w.page_view.page_rect(0).width() - (vp.width() - 24)) <= 2
+
+
+def test_open_shows_pages_and_close_shuts_service_first(qtbot, simple_pdf, qtlog):
+    w = MainWindow(); qtbot.addWidget(w); w.show()
+    assert w.render_service is None
+    w.open_path(simple_pdf)
+    qtbot.waitExposed(w)
+    assert w.page_view.doc is w.doc and w.page_view.service is w.render_service
+    assert w.page_view.visible_pages()
+    order = []
+    service, doc = w.render_service, w.doc
+    orig_shutdown, orig_close = service.shutdown, doc.close
+    service.shutdown = lambda: (order.append("shutdown"), orig_shutdown())
+    doc.close = lambda: (order.append("close"), orig_close())
+    w.close()
+    assert order == ["shutdown", "close"]
+    assert w.render_service is None and w.page_view.doc is None
+    # offscreen プラグイン自身が出す propagateSizeHints の注意以外は出ていない
+    assert not [r for r in qtlog.records
+                if r.type != QtMsgType.QtDebugMsg and "propagateSizeHints" not in r.message]
+
+
+def test_document_changed_reloads_layout(qtbot, big_pdf):
+    w = MainWindow(); qtbot.addWidget(w); w.show()
+    w.open_path(big_pdf(5))
+    calls = []
+    orig = w.render_service.invalidate
+    w.render_service.invalidate = lambda indices=None: (calls.append(indices), orig(indices))
+    w.doc.delete_pages([0, 1])
+    w.document_changed.emit()
+    assert calls == [None]
+    assert w.page_view.page_rect(2).isValid() and not w.page_view.page_rect(3).isValid()
 
 
 def test_excepthook_writes_log(tmp_path, monkeypatch):

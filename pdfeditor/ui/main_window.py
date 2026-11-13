@@ -3,7 +3,7 @@ from pathlib import Path
 
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QAction, QKeySequence
-from PySide6.QtWidgets import QFileDialog, QLabel, QMainWindow
+from PySide6.QtWidgets import QFileDialog, QLabel, QMainWindow, QStackedWidget
 
 from pdfeditor.core.document import PdfDocument
 from pdfeditor.core.errors import (
@@ -14,6 +14,8 @@ from pdfeditor.core.errors import (
 )
 from pdfeditor.ui import dialogs, messages
 from pdfeditor.ui.page_commands import make_undo_stack
+from pdfeditor.ui.page_view import PageView
+from pdfeditor.ui.render_service import RenderService
 
 
 def _same_file(a: Path, b: Path) -> bool:
@@ -32,14 +34,21 @@ class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.doc: PdfDocument | None = None
+        self.render_service: RenderService | None = None  # 文書を開いた時に作る
         self.password_retry = False  # dialogs.ask_password が「違う」の注記に使う
         self.undo_stack = make_undo_stack(self)
         self.setAcceptDrops(True)
         self.resize(1000, 750)
 
-        placeholder = QLabel(messages.EMPTY_HINT)  # Task 9 でページ表示に置き換わる
-        placeholder.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.setCentralWidget(placeholder)
+        # 文書がない間は案内文、開いたらページ表示
+        self._placeholder = QLabel(messages.EMPTY_HINT)
+        self._placeholder.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.page_view = PageView()
+        self._central = QStackedWidget()
+        self._central.addWidget(self._placeholder)
+        self._central.addWidget(self.page_view)
+        self.setCentralWidget(self._central)
+        self.document_changed.connect(self._on_document_changed)
 
         self._build_menus()
         self._update_title()
@@ -78,9 +87,30 @@ class MainWindow(QMainWindow):
         edit_menu.addAction(self.undo_action)
         edit_menu.addAction(self.redo_action)
 
-        # 中身は Task 9〜11 が足す
+        # 中身は Task 10〜11 が足す
         self.page_menu = bar.addMenu(messages.MENU_PAGE)
+
         self.view_menu = bar.addMenu(messages.MENU_VIEW)
+        self.zoom_in_action = self._view_action(
+            messages.ACTION_ZOOM_IN, "Ctrl++", self.page_view.zoom_in)
+        self.zoom_out_action = self._view_action(
+            messages.ACTION_ZOOM_OUT, "Ctrl+-", self.page_view.zoom_out)
+        self.fit_width_action = self._view_action(
+            messages.ACTION_FIT_WIDTH, "Ctrl+1", self.page_view.fit_width)
+        self.fit_page_action = self._view_action(
+            messages.ACTION_FIT_PAGE, "Ctrl+0", self.page_view.fit_page)
+
+    def _view_action(self, text: str, shortcut: str, slot) -> QAction:
+        action = QAction(text, self)
+        action.setShortcut(QKeySequence(shortcut))
+        action.setEnabled(False)  # 文書を開くまでは使えない
+        action.triggered.connect(slot)
+        self.view_menu.addAction(action)
+        return action
+
+    def _view_actions(self) -> list[QAction]:
+        return [self.zoom_in_action, self.zoom_out_action,
+                self.fit_width_action, self.fit_page_action]
 
     # --- 開く -------------------------------------------------------------
     def _choose_and_open(self) -> None:
@@ -147,10 +177,22 @@ class MainWindow(QMainWindow):
     def _attach(self, doc: PdfDocument) -> None:
         self.doc = doc
         self.undo_stack.clear()
+        self.render_service = RenderService(doc, parent=self)
+        self.page_view.set_document(doc, self.render_service)
+        self._central.setCurrentWidget(self.page_view)
+        self.page_view.setFocus()
+        for action in self._view_actions():
+            action.setEnabled(True)
         self._update_title()
         self.document_loaded.emit()
         if doc.is_signed:
             dialogs.show_info(self, messages.SIGNED_NOTICE)
+
+    def _on_document_changed(self) -> None:
+        """文書は既に変わっている。古い画像を捨ててから並びを読み直す。"""
+        if self.render_service is not None:
+            self.render_service.invalidate()
+            self.page_view.reload_layout()
 
     def _update_title(self) -> None:
         if self.doc is not None and self.doc.path is not None:
@@ -183,6 +225,10 @@ class MainWindow(QMainWindow):
     def closeEvent(self, event) -> None:
         if self in MainWindow.instances:
             MainWindow.instances.remove(self)
+        self.page_view.set_document(None, None)
+        if self.render_service is not None:  # 描画スレッドを止めてから文書を閉じる
+            self.render_service.shutdown()
+            self.render_service = None
         if self.doc is not None:
             self.doc.close()
             self.doc = None

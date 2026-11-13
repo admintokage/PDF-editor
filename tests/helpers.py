@@ -26,6 +26,30 @@ def labels(doc) -> list[int]:
     return out
 
 
+def make_view(qtbot, pdf_path: Path, size=(800, 1000)):
+    """文書を開いて PageView に載せ、表示されるまで待つ。後始末は描画サービスを止めてから
+    文書を閉じる（RenderService の約束）。"""
+    from pdfeditor.core.document import PdfDocument
+    from pdfeditor.ui.page_view import PageView
+    from pdfeditor.ui.render_service import RenderService
+
+    doc = PdfDocument.open(pdf_path)
+    service = RenderService(doc)
+    view = PageView()
+
+    def cleanup(_view) -> None:
+        view.set_document(None, None)
+        service.shutdown()
+        doc.close()
+
+    qtbot.addWidget(view, before_close_func=cleanup)
+    view.resize(*size)
+    view.set_document(doc, service)
+    view.show()
+    qtbot.waitExposed(view)
+    return view
+
+
 def snapshot(doc) -> tuple:
     """(ラベル列, 各ページの回転, 各ページの大きさ(整数))。元に戻すの検証用。"""
     with doc.lock:
