@@ -24,3 +24,12 @@ def labels(doc) -> list[int]:
             m = re.search(r"Page (\d+)", doc.fitz[i].get_text())
             out.append(int(m.group(1)) if m else 0)
     return out
+
+
+def snapshot(doc) -> tuple:
+    """(ラベル列, 各ページの回転, 各ページの大きさ(整数))。元に戻すの検証用。"""
+    with doc.lock:
+        n = doc.fitz.page_count
+        rotations = tuple(doc.page_rotation(i) for i in range(n))
+        sizes = tuple(tuple(round(v) for v in doc.page_size(i)) for i in range(n))
+    return (tuple(labels(doc)), rotations, sizes)
