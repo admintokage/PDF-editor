@@ -12,3 +12,15 @@ def lock_file(path: Path):
         yield f
     finally:
         f.close()
+
+
+def labels(doc) -> list[int]:
+    """各ページの文字 "Page N" から N の列を返す。なければ 0。"""
+    import re
+
+    out = []
+    with doc.lock:
+        for i in range(doc.fitz.page_count):
+            m = re.search(r"Page (\d+)", doc.fitz[i].get_text())
+            out.append(int(m.group(1)) if m else 0)
+    return out
