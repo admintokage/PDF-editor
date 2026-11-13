@@ -50,6 +50,28 @@ def make_view(qtbot, pdf_path: Path, size=(800, 1000)):
     return view
 
 
+def open_window(qtbot, pdf_path: Path):
+    """MainWindow を出して（offscreen）文書を開き、表示されるまで待つ。後始末では変更を
+    保存済み扱いにしてから閉じる（閉じる時に保存を尋ねないように）。"""
+    from pdfeditor.ui.main_window import MainWindow
+
+    window = MainWindow()
+
+    def cleanup(_window) -> None:
+        window.undo_stack.setClean()
+
+    qtbot.addWidget(window, before_close_func=cleanup)
+    window.show()
+    assert window.open_path(pdf_path)
+    qtbot.waitExposed(window)
+    return window
+
+
+def select(window, indices: list[int]) -> None:
+    """サムネイル一覧でページ indices を選ぶ（それ以外の選択は外す）。"""
+    window.thumbnails.select_pages(indices)
+
+
 def snapshot(doc) -> tuple:
     """(ラベル列, 各ページの回転, 各ページの大きさ(整数))。元に戻すの検証用。"""
     with doc.lock:
