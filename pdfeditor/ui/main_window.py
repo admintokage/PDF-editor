@@ -86,6 +86,7 @@ class MainWindow(QMainWindow):
         self._saving = False
         self._save_result: SaveFailedError | None = None
         self._save_loop: QEventLoop | None = None
+        self._save_signals: _SaveSignals | None = None
         self.undo_stack = make_undo_stack(self)
         self.setAcceptDrops(True)
         self.resize(1000, 750)
@@ -232,6 +233,8 @@ class MainWindow(QMainWindow):
             self.open_path(Path(name))
 
     def handle_dropped_paths(self, paths: list[Path]) -> None:
+        if self._saving:
+            return
         for path in paths:
             if path.suffix.lower() == ".pdf":
                 self.open_path(path)
@@ -447,7 +450,7 @@ class MainWindow(QMainWindow):
     def _save_in_background(self, target: Path | None) -> SaveFailedError | None:
         """doc.save を別スレッドで走らせ、終わるまでイベントを回して待つ。"""
         self._set_saving(True)
-        loop = QEventLoop(self)
+        loop = QEventLoop()  # 親なし。終わったら deleteLater
         self._save_loop = loop
         self._save_result = None
         progress: QProgressDialog | None = None
@@ -464,6 +467,7 @@ class MainWindow(QMainWindow):
         timer.setSingleShot(True)
         timer.timeout.connect(show_progress)
         signals = _SaveSignals()
+        self._save_signals = signals  # 作業スレッドが使い終わるまで保持する
         signals.done.connect(self._on_save_done, Qt.ConnectionType.QueuedConnection)
         try:
             timer.start(PROGRESS_DELAY_MS)
@@ -476,6 +480,7 @@ class MainWindow(QMainWindow):
                 progress.close()
                 progress.deleteLater()
             self._save_loop = None
+            loop.deleteLater()
             self._set_saving(False)
         return self._save_result
 

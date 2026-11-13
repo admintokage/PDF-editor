@@ -12,8 +12,6 @@ from pdfeditor.ui.main_window import MainWindow
 from pdfeditor.ui.page_commands import MovePagesCommand, push_command
 from tests.helpers import lock_file, open_window, select
 
-SAMPLE = (r"C:\Claude\PDF-editor\.superpowers\sdd\2026-11-13-stage1-viewer-pages-packaging"
-          r"\task-11-sample-saved.pdf")
 
 
 def test_save_clears_modified(qtbot, simple_pdf):
@@ -175,6 +173,8 @@ def test_close_without_changes_does_not_ask(qtbot, simple_pdf, monkeypatch):
 
 def test_saved_file_has_no_repair_warnings_and_keeps_toc(qtbot, toc_links_pdf, tmp_path, monkeypatch):
     other = tmp_path / "other.pdf"
+    saved_path = tmp_path / "saved.pdf"
+    monkeypatch.setattr("pdfeditor.ui.dialogs.show_save_error", lambda p, e: pytest.fail("save failed"))
     src = pymupdf.open()
     for i in range(2):
         src.new_page().insert_text((72, 100), f"Ins {i}")
@@ -183,7 +183,7 @@ def test_saved_file_has_no_repair_warnings_and_keeps_toc(qtbot, toc_links_pdf, t
     monkeypatch.setattr("PySide6.QtWidgets.QFileDialog.getOpenFileName",
                         lambda *a, **k: (str(other), ""))
     monkeypatch.setattr("PySide6.QtWidgets.QFileDialog.getSaveFileName",
-                        lambda *a, **k: (SAMPLE, ""))
+                        lambda *a, **k: (str(saved_path), ""))
     w = open_window(qtbot, toc_links_pdf)
     push_command(w.undo_stack, MovePagesCommand(w.doc, [0], 4, w.document_changed.emit))  # 並べ替え
     select(w, [3]); w.delete_selected_pages()
@@ -192,10 +192,29 @@ def test_saved_file_has_no_repair_warnings_and_keeps_toc(qtbot, toc_links_pdf, t
     select(w, [0]); w.insert_pdf_pages()
     assert w.save_as()
     pymupdf.TOOLS.mupdf_warnings()  # 溜まった分を捨てる
-    saved = pymupdf.open(SAMPLE)
+    saved = pymupdf.open(saved_path)
     for page in saved:
         page.get_text(); page.get_links(); page.get_pixmap(dpi=36)
     assert pymupdf.TOOLS.mupdf_warnings() == ""
     assert saved.page_count == 5 - 1 + 1 + 2
     assert len(saved.get_toc()) >= 1
     saved.close()
+
+
+def test_drop_and_open_refused_while_saving(qtbot, simple_pdf, tmp_path, monkeypatch):
+    w = open_window(qtbot, simple_pdf)
+    other = tmp_path / "other.pdf"
+    doc = pymupdf.open(); doc.new_page(); doc.save(other); doc.close()
+    release = threading.Event()
+    real = w.doc.save
+    monkeypatch.setattr(w.doc, "save", lambda target=None: (release.wait(5), real(target))[1])
+    count = len(MainWindow.instances)
+    seen = {}
+
+    def during():
+        w.handle_dropped_paths([other])
+        seen["open"] = w.open_path(other)
+        release.set()
+    QTimer.singleShot(50, during)
+    assert w.save() is True
+    assert seen == {"open": False} and len(MainWindow.instances) == count
