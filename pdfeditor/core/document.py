@@ -5,10 +5,12 @@ from pathlib import Path
 
 import pymupdf
 
-from pdfeditor.core import errors, page_detach, safe_save
+from pdfeditor.core import errors, page_detach, safe_save, scrub
 from pdfeditor.core.page_detach import DetachedPages
 
 _PERM_OWNER_BIT = 4  # authenticate() の戻り値で、権限パスワード一致を示すビット
+_SCRUB_FAILED = ("削除したページの一部をファイルから取り除けなかったため、保存を中止しました。"
+                 "元のファイルはそのままです。")
 
 PAGE_SIZES: dict[str, tuple[float, float]] = {
     "A4 縦": (595, 842), "A4 横": (842, 595),
@@ -89,8 +91,9 @@ class RenderedPage:
 
 
 def absolute_path(path: Path) -> Path:
-    """作業フォルダが変わっても同じファイルを指すよう、絶対パスにする（シンボリックリンクは
-    たどらない。たどれない時も失敗しない）。"""
+    """作業フォルダが変わっても同じファイルを指すよう、絶対パスにする。Path.resolve を使うので
+    シンボリックリンクはたどり、ネットワークドライブの割り当て（Z: など）は UNC パス
+    （\\\\server\\share\\...）になることがある。resolve が失敗した時は absolute() で済ませる。"""
     path = Path(path)
     try:
         return path.resolve()
@@ -108,6 +111,14 @@ class PdfDocument:
         # 開いた時のパスワード。保存時に、暗号化を保ったまま写しを作り直すのに使う。
         # 記録やログには出さない。
         self._password = password
+        self._tree_flat = False  # ページツリーの受け継ぎ属性をページに書き写したか
+
+    def _ensure_flat_tree(self) -> None:
+        """ページの構成を変える前に一度だけ、受け継ぎ属性を各ページに書き写す（lock を保持して呼ぶ）。
+        見た目は変わらない。500 ページで約 16 ms。"""
+        if not self._tree_flat:
+            page_detach.flatten_page_tree(self.fitz)
+            self._tree_flat = True
 
     def __repr__(self) -> str:  # パスワードを表示しない
         return f"PdfDocument(path={self.path!r})"
@@ -191,6 +202,7 @@ class PdfDocument:
             self._check_position(to)
             if not indices:
                 return
+            self._ensure_flat_tree()
             self._permute(page_order_after_move(self.fitz.page_count, indices, to))
 
     def reorder(self, order: list[int]) -> None:
@@ -198,6 +210,7 @@ class PdfDocument:
         with self.lock:
             if sorted(order) != list(range(self.fitz.page_count)):
                 raise ValueError("並べ替えの指定がページ番号の順列になっていません。")
+            self._ensure_flat_tree()
             self._permute(order)
 
     def delete_pages(self, indices: list[int]) -> DetachedPages | None:
@@ -210,6 +223,7 @@ class PdfDocument:
                 return None
             if len(indices) >= self.fitz.page_count:
                 raise errors.PageOperationError("最後の 1 ページは削除できません。")
+            self._ensure_flat_tree()  # 戻した先のノードから属性を受け継がないように
             order = sorted(indices)
             doomed = set(order)
             keep = [i for i in range(self.fitz.page_count) if i not in doomed]
@@ -219,14 +233,21 @@ class PdfDocument:
                 if kind == pymupdf.PDF_ANNOT_WIDGET
             ]
             before = page_detach.objects_touched_by_delete(self.fitz, keep)
-            removals = page_detach.remove_form_fields(self.fitz, widgets)
+            removals: list = []
+            detached = False
             try:
+                page_detach.remove_form_fields(self.fitz, widgets, removals)
                 self.fitz.delete_pages(order)
+                detached = True
+                changed = page_detach.only_changed(self.fitz, before)
+                return DetachedPages(order, page_xrefs, removals, changed)
             except BaseException:
+                # 途中で失敗したら、文書を削除前の状態に戻してから知らせる
+                if detached:
+                    page_detach.insert_page_objects(self.fitz, order, page_xrefs)
                 page_detach.restore_form_fields(self.fitz, removals)
+                page_detach.restore_objects(self.fitz, before)
                 raise
-            changed = page_detach.only_changed(self.fitz, before)
-            return DetachedPages(order, page_xrefs, removals, changed)
 
     def restore_pages(self, detached: DetachedPages) -> None:
         """delete_pages で外したページを、同じオブジェクトのまま元の位置に戻す。フォーム部品、
@@ -240,6 +261,7 @@ class PdfDocument:
     def insert_blank(self, at: int, width: float, height: float) -> None:
         with self.lock:
             self._check_position(at)
+            self._ensure_flat_tree()  # 置いた先のノードの向きや切り抜きを受け継がないように
             self.fitz.new_page(pno=at, width=width, height=height)
 
     def default_blank_size(self, at: int) -> tuple[float, float]:
@@ -253,8 +275,19 @@ class PdfDocument:
             self._check_position(at)
             src = _open_authenticated(data, "挿入する PDF", password, require_edit=False)
             try:
+                self._ensure_flat_tree()
                 count = src.page_count
-                self.fitz.insert_pdf(src, start_at=at)
+                before = self.fitz.page_count
+                try:
+                    self.fitz.insert_pdf(src, start_at=at)
+                except Exception as exc:
+                    # 途中まで入ったページがあれば取り除き、文書を挿入前に戻す
+                    added = self.fitz.page_count - before
+                    if added > 0:
+                        self.delete_pages(list(range(at, at + added)))
+                    raise errors.PageOperationError(
+                        "PDF を挿入できませんでした。挿入する PDF が壊れている可能性があります。"
+                    ) from exc
             finally:
                 src.close()
             return count
@@ -289,18 +322,29 @@ class PdfDocument:
                 page = self._page(i)
                 page.set_rotation((page.rotation + delta) % 360)
 
-    def to_bytes(self) -> bytes:
+    def _snapshot(self) -> bytes:
+        """今の文書をそのままバイト列にする（lock を保持して呼ぶ）。garbage なしなので文書の中身は
+        変わらない（削除を元に戻すために残してあるページも残る）。暗号化は元のまま。"""
+        return self.fitz.tobytes(encryption=pymupdf.PDF_ENCRYPT_KEEP)
+
+    def to_bytes(self, raw: bytes | None = None) -> bytes:
         """保存するバイト列。パスワードと編集制限は元のまま残す（PDF_ENCRYPT_KEEP）。
 
-        不要オブジェクトの掃除（garbage）は、生きている文書ではなく写しで行う。生きている文書で
-        掃除すると、削除を元に戻すために残してあるページ（page_detach）が消えるため。"""
+        写し（raw から開いたもの）の上で、削除したページへの参照を取り除き（scrub）、不要
+        オブジェクトを掃除（garbage）する。生きている文書で掃除すると、元に戻すために残してある
+        ページが消えるため。raw を渡せば lock は要らない（写しは文書と独立している）。"""
+        if raw is None:
+            with self.lock:
+                raw = self._snapshot()
         keep = pymupdf.PDF_ENCRYPT_KEEP
-        with self.lock:
-            raw = self.fitz.tobytes(encryption=keep)  # garbage なし: 文書の中身を変えない
         copy = pymupdf.open(stream=raw, filetype="pdf")
         try:
             if copy.needs_pass:
                 copy.authenticate(self._password or "")
+            try:
+                scrub.scrub_detached_pages(copy)
+            except scrub.UnscrubbableError as exc:
+                raise errors.SaveFailedError(_SCRUB_FAILED, "verify_failed") from exc
             return copy.tobytes(garbage=3, deflate=True, encryption=keep)
         finally:
             copy.close()
@@ -308,9 +352,10 @@ class PdfDocument:
     def save(self, target: Path | None = None) -> None:
         """target が None または現在のパスと同じなら上書き（初回のみバックアップ）。
         失敗時は SaveFailedError で、元のファイルには触れない。成功後は self.path が保存先になる。"""
-        with self.lock:  # バイト列とページ数を同じ瞬間の状態で取る
-            data = self.to_bytes()
+        with self.lock:  # バイト列とページ数を同じ瞬間の状態で取る。ここだけ描画を止める
+            raw = self._snapshot()
             pages = self.fitz.page_count
+        data = self.to_bytes(raw)  # 写しの掃除と書き出しは lock の外で
         dest = absolute_path(target) if target is not None else self.path
         if dest is None:
             raise errors.SaveFailedError("保存先が指定されていません。", "other")
@@ -324,5 +369,6 @@ class PdfDocument:
 
     def close(self) -> None:
         with self.lock:
+            self._password = None
             if not self.fitz.is_closed:
                 self.fitz.close()

@@ -36,7 +36,7 @@ OPEN_DIALOG_TITLE = "PDF を開く"
 OPEN_DIALOG_FILTER = "PDF ファイル (*.pdf)"
 EMPTY_HINT = "ここに PDF ファイルをドロップするか、ファイルメニューから開いてください"
 OPEN_SHOW_FAILED = "「{name}」を表示できません。PDF ファイルが壊れている可能性があります。"
-SIGNED_NOTICE ="この PDF には電子署名があります。編集して保存すると署名は無効になります。"
+SIGNED_NOTICE = "この PDF には電子署名があります。編集して保存すると署名は無効になります。"
 
 # ページ一覧と挿入
 PAGES_DOCK_TITLE = "ページ"

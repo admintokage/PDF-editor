@@ -115,6 +115,41 @@ def test_deleted_pages_are_not_in_saved_file(form_pdf, tmp_path):
     assert r.fitz.is_form_pdf == 2 and form_tree_problems(r.fitz) == []
 
 
+@pytest.mark.parametrize("failing", ["only_changed", "remove_form_fields"])
+def test_failed_delete_leaves_document_unchanged(form_pdf, tmp_path, monkeypatch, failing):
+    from pdfeditor.core import page_detach
+    d = PdfDocument.open(form_pdf)
+    d.move_pages([4], 0); d.move_pages([0], 5)  # 受け継ぎ属性の書き写しは済ませておく
+    before = snapshot(d)
+    real = getattr(page_detach, failing)
+
+    def boom(*a, **k):
+        real(*a, **k)  # 途中まで進めてから失敗する
+        raise RuntimeError("boom")
+    monkeypatch.setattr(page_detach, failing, boom)
+    with pytest.raises(RuntimeError):
+        d.delete_pages([0, 2])
+    monkeypatch.undo()
+    assert snapshot(d) == before and form_tree_problems(d.fitz) == []
+    assert snapshot(_reopen(d, tmp_path)) == before
+
+
+def test_failed_insert_leaves_document_unchanged(form_pdf, simple_pdf, monkeypatch):
+    """挿入が途中で失敗したら、入りかけたページを取り除いて日本語で知らせる。"""
+    d = PdfDocument.open(form_pdf); before = snapshot(d)
+    real = pymupdf.Document.insert_pdf
+
+    def partial(self, src, *a, **k):
+        real(self, src, from_page=0, to_page=0, start_at=k.get("start_at", -1))
+        raise RuntimeError("broken source")
+    monkeypatch.setattr(pymupdf.Document, "insert_pdf", partial)
+    with pytest.raises(errors.PageOperationError) as e:
+        d.insert_from_file(simple_pdf, 2)
+    assert "挿入できませんでした" in e.value.user_message
+    monkeypatch.undo()
+    assert snapshot(d) == before and form_tree_problems(d.fitz) == []
+
+
 # ---- C2: 保存してもパスワードと編集制限が残る ----
 
 def test_user_password_survives_save(user_pw_pdf, tmp_path):

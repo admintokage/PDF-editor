@@ -33,7 +33,7 @@ def test_locked_target_raises_and_keeps_original(simple_pdf):
 
 def test_verify_failure_keeps_original(simple_pdf, monkeypatch):
     original = simple_pdf.read_bytes()
-    monkeypatch.setattr(PdfDocument, "to_bytes", lambda self: b"not a pdf")
+    monkeypatch.setattr(PdfDocument, "to_bytes", lambda self, raw=None: b"not a pdf")
     with pytest.raises(errors.SaveFailedError) as e: PdfDocument.open(simple_pdf).save()
     assert e.value.reason == "verify_failed" and simple_pdf.read_bytes() == original
     assert not list(simple_pdf.parent.glob("*.tmp-*.pdf"))
@@ -98,7 +98,7 @@ def test_page_count_mismatch_is_verify_failed(simple_pdf, monkeypatch):
     import pymupdf
     one = pymupdf.open(); one.new_page(); data = one.tobytes(); one.close()
     original = simple_pdf.read_bytes()
-    monkeypatch.setattr(PdfDocument, "to_bytes", lambda self: data)
+    monkeypatch.setattr(PdfDocument, "to_bytes", lambda self, raw=None: data)
     with pytest.raises(errors.SaveFailedError) as e: PdfDocument.open(simple_pdf).save()
     assert e.value.reason == "verify_failed" and simple_pdf.read_bytes() == original
     assert not list(simple_pdf.parent.glob("*.tmp-*.pdf"))
@@ -164,6 +164,41 @@ def test_save_as_relative_path_then_overwrite_is_same_file(simple_pdf, tmp_path,
     assert d.path == (tmp_path / "copy.pdf").resolve()
     d.save(str(tmp_path / "copy.pdf"))  # 同じファイルを絶対パスで指定: 上書き扱い
     assert d.backup_done
+
+
+def test_save_holds_lock_only_for_the_snapshot(big_pdf, tmp_path, monkeypatch):
+    """写しの掃除と書き出しの間は lock を手放している（描画スレッドを止めない）。"""
+    import threading
+
+    import pymupdf
+    d = PdfDocument.open(big_pdf(5)); d.delete_pages([1])
+    real_tobytes = pymupdf.Document.tobytes
+    free_during_compaction = []
+
+    def watch(self, *a, **k):
+        if k.get("garbage"):  # 写しの書き出し
+            got = []
+
+            def try_lock():
+                ok = d.lock.acquire(timeout=2)
+                got.append(ok)
+                if ok:
+                    d.lock.release()
+            t = threading.Thread(target=try_lock)
+            t.start(); t.join()
+            free_during_compaction.append(got[0])
+        return real_tobytes(self, *a, **k)
+    monkeypatch.setattr(pymupdf.Document, "tobytes", watch)
+    d.save(tmp_path / "o.pdf")
+    assert free_during_compaction == [True]
+    assert PdfDocument.open(tmp_path / "o.pdf").page_count == 4
+
+
+def test_close_forgets_password(user_pw_pdf):
+    d = PdfDocument.open(user_pw_pdf, "user")
+    assert d._password == "user" and "'user'" not in repr(d)
+    d.close()
+    assert d._password is None
 
 
 def test_fsync_failure_keeps_original(simple_pdf, monkeypatch):

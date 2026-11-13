@@ -74,11 +74,12 @@ def _take(pdf, owner: int, xref: int, out: list[_Removal]) -> bool:
     return True
 
 
-def remove_form_fields(doc: pymupdf.Document, widget_xrefs: list[int]) -> list[_Removal]:
+def remove_form_fields(doc: pymupdf.Document, widget_xrefs: list[int],
+                       removals: list[_Removal]) -> list[_Removal]:
     """部品 widget_xrefs を AcroForm から外す。親の Kids が空になったら親も外す
-    （他のページに残る部品がある親は残す）。計算順 /CO からも外す。外した位置を返す。"""
+    （他のページに残る部品がある親は残す）。計算順 /CO からも外す。外した位置を removals に
+    外した順に足していく（途中で失敗しても、そこまでを restore_form_fields で戻せる）。"""
     pdf = _pdf(doc)
-    removals: list[_Removal] = []
     for node in widget_xrefs:
         while True:
             parent = mupdf.pdf_dict_gets(mupdf.pdf_load_object(pdf, node), "Parent")
@@ -124,6 +125,40 @@ def only_changed(doc: pymupdf.Document, before: dict[int, str]) -> dict[int, str
 def restore_objects(doc: pymupdf.Document, saved: dict[int, str]) -> None:
     for xref, text in saved.items():
         doc.update_object(xref, text)
+
+
+INHERITABLE_KEYS = ("Resources", "MediaBox", "CropBox", "Rotate")
+
+
+def flatten_page_tree(doc: pymupdf.Document) -> None:
+    """ページが中間の /Pages ノードから受け継いでいる属性（Resources・MediaBox・CropBox・Rotate）を
+    各ページに書き写し、ノードからは消す。
+
+    PyMuPDF の move_page と MuPDF の pdf_insert_page は、ページを別のノードへ移すとき属性を
+    書き写さないので、移った先のノードの大きさ・向き・フォントを受け継いでしまう。どのページも
+    自分の属性だけで描かれるようにしておけば、どこへ移しても見た目は変わらない。
+    ノードから消すのは、新しく足すページ（空白ページ・挿入）が置かれた先の属性を受け継がない
+    ようにするため。どのページの見た目も変えない（テストで確かめている）。"""
+    pdf = _pdf(doc)
+    for i in range(doc.page_count):
+        mupdf.pdf_flatten_inheritable_page_items(mupdf.pdf_lookup_page_obj(pdf, i))
+    pages_name = mupdf.pdf_new_name("Pages")
+    stack = [mupdf.pdf_dict_getp(mupdf.pdf_trailer(pdf), "Root/Pages")]
+    seen: set[int] = set()
+    while stack:
+        node = stack.pop()
+        num = mupdf.pdf_to_num(node)
+        if num in seen:  # 壊れた PDF のループに備える
+            continue
+        seen.add(num)
+        for key in INHERITABLE_KEYS:
+            mupdf.pdf_dict_dels(node, key)
+        kids = mupdf.pdf_dict_gets(node, "Kids")
+        for i in range(mupdf.pdf_array_len(kids)):
+            kid = mupdf.pdf_array_get(kids, i)
+            if mupdf.pdf_name_eq(mupdf.pdf_dict_gets(kid, "Type"), pages_name):
+                stack.append(kid)
+    doc._reset_page_refs()
 
 
 def insert_page_objects(doc: pymupdf.Document, indices: list[int], page_xrefs: list[int]) -> None:
