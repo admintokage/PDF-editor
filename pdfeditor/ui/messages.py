@@ -5,6 +5,8 @@ CMD_DELETE_PAGES = "ページの削除"
 CMD_INSERT_BLANK = "空白ページの追加"
 CMD_INSERT_PDF = "PDF の挿入"
 CMD_ROTATE_PAGES = "ページの回転"
+CMD_CUT_PAGES = "ページの切り取り"
+CMD_PASTE_PAGES = "ページの貼り付け"
 UNDO_FAILED = ("元に戻す（またはやり直し）を最後まで行えませんでした。"
                "操作の履歴は消去しました。今の内容を確かめてから、別の名前で保存してください。")
 

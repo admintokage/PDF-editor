@@ -18,6 +18,15 @@ def _no_unsaved_prompt(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _empty_page_clipboard():
+    """ページ用クリップボードはアプリに 1 つなので、テストごとに空にする。"""
+    yield
+    from pdfeditor.ui import page_clipboard
+
+    page_clipboard.clipboard().clear()
+
+
+@pytest.fixture(autouse=True)
 def _close_all_windows():
     yield
     from pdfeditor.ui.main_window import MainWindow

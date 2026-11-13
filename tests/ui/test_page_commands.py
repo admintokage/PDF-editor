@@ -168,6 +168,46 @@ def test_insert_pdf_undo_leaves_no_orphan_fields(qtbot, form_pdf, tmp_path):
     assert snapshot(r) == before and form_tree_problems(r.fitz) == []
 
 
+def test_paste_inserts_exported_pages_and_undoes(qtbot, big_pdf):
+    from pdfeditor.ui.page_commands import PastePagesCommand
+    src = PdfDocument.open(big_pdf(2))
+    with src.lock:  # 貼り付けるページに別の印を付ける（a, b）
+        for i, mark in enumerate("ab"):
+            src.fitz[i].insert_text((72, 300), f"Mark {mark}")
+    data = src.export_pages([0, 1])
+    d = PdfDocument.open(big_pdf(5)); before = snapshot(d); stack = make_undo_stack(None)
+    cmd = PastePagesCommand(d, data, 2)
+    assert cmd.text() == messages.CMD_PASTE_PAGES
+    push_command(stack, cmd)
+    with d.lock:
+        marks = [d.fitz[i].get_text() for i in range(d.fitz.page_count)]
+    assert labels(d) == [1, 2, 1, 2, 3, 4, 5]
+    assert ["Mark a" in t for t in marks] == [False, False, True, False, False, False, False]
+    assert "Mark b" in marks[3]
+    stack.undo(); assert snapshot(d) == before
+    stack.redo(); assert d.page_count == 7 and "Mark a" in d.fitz[2].get_text()
+
+
+def test_cut_command_is_a_delete_that_undoes_links_toc_and_form(qtbot, form_pdf, toc_links_pdf):
+    from pdfeditor.ui.page_commands import CutPagesCommand
+    d = PdfDocument.open(form_pdf); before = snapshot(d); stack = make_undo_stack(None)
+    cmd = CutPagesCommand(d, [0, 2])
+    assert cmd.text() == messages.CMD_CUT_PAGES
+    push_command(stack, cmd); assert labels(d) == [2, 4, 5]
+    stack.undo(); assert snapshot(d) == before and form_tree_problems(d.fitz) == []
+    t = PdfDocument.open(toc_links_pdf); toc, links = t.fitz.get_toc(), _links(t)
+    push_command(stack, CutPagesCommand(t, [3, 0])); stack.undo()
+    assert t.fitz.get_toc() == toc and _links(t) == links
+
+
+def test_cut_of_every_page_fails_and_changes_nothing(qtbot, simple_pdf):
+    from pdfeditor.ui.page_commands import CutPagesCommand
+    d = PdfDocument.open(simple_pdf); before = snapshot(d); stack = make_undo_stack(None)
+    with pytest.raises(errors.PageOperationError):
+        push_command(stack, CutPagesCommand(d, [0, 1, 2]))
+    assert stack.count() == 0 and snapshot(d) == before
+
+
 def _links(d):
     """各ページのリンクを (種類, 矩形, 行き先ページ) の並びで返す。"""
     out = []

@@ -147,6 +147,22 @@ class InsertPdfCommand(_PageCommand):
         self._doc.delete_pages(list(range(self._at, self._at + self._count)))
 
 
+class CutPagesCommand(DeletePagesCommand):
+    """ページの切り取り。文書への働きはページの削除と同じ（クリップボードは呼び出し側が扱う）。"""
+
+    def __init__(self, doc, indices: list[int], doc_changed: DocChanged | None = None):
+        super().__init__(doc, indices, doc_changed)
+        self.setText(messages.CMD_CUT_PAGES)
+
+
+class PastePagesCommand(InsertPdfCommand):
+    """ページの貼り付け。クリップボードのバイト列（暗号化なし）を挿入する。"""
+
+    def __init__(self, doc, data: bytes, at: int, doc_changed: DocChanged | None = None):
+        super().__init__(doc, data, at, None, doc_changed)
+        self.setText(messages.CMD_PASTE_PAGES)
+
+
 class RotatePagesCommand(_PageCommand):
     def __init__(self, doc, indices: list[int], delta: int, doc_changed: DocChanged | None = None):
         super().__init__(messages.CMD_ROTATE_PAGES, doc, doc_changed)
