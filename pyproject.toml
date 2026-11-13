@@ -3,7 +3,7 @@ name = "pdf-editor"
 version = "0.1.0"
 description = "Windows 向け PDF エディタ"
 requires-python = ">=3.12,<3.13"
-license = { text = "AGPL-3.0-or-later" }
+license = { text = "AGPL-3.0-only" }
 dependencies = [
     "pymupdf>=1.28,<1.29",
     "PySide6-Essentials>=6.12,<6.13",

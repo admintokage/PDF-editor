@@ -39,13 +39,20 @@ def main(argv: list[str]) -> int:
     samples, width, height = render_sample_page()
     if width <= 0 or height <= 0 or not samples:
         return 1
-    if "--self-test" in argv:
-        return 0
+    self_test = "--self-test" in argv
+    if self_test:
+        os.environ["QT_QPA_PLATFORM"] = "offscreen"
 
     from PySide6.QtGui import QImage, QPixmap
     from PySide6.QtWidgets import QApplication, QLabel, QVBoxLayout, QWidget
 
     app = QApplication(argv)
+    image = QImage(samples, width, height, width * 3, QImage.Format.Format_RGB888).copy()
+    if image.isNull():
+        return 1
+    if self_test:
+        return 0 if not QPixmap.fromImage(image).isNull() else 1
+
     window = QWidget()
     window.setWindowTitle(TITLE)
     layout = QVBoxLayout(window)
@@ -53,9 +60,8 @@ def main(argv: list[str]) -> int:
     layout.addWidget(QLabel(pymupdf_summary()))
     layout.addWidget(QLabel(f"Windows: {platform.platform()}"))
     layout.addWidget(QLabel(f"実行フォルダ: {run_folder()}"))
-    image = QImage(samples, width, height, width * 3, QImage.Format.Format_RGB888)
     picture = QLabel()
-    picture.setPixmap(QPixmap.fromImage(image.copy()))
+    picture.setPixmap(QPixmap.fromImage(image))
     layout.addWidget(picture)
     window.show()
     return app.exec()
