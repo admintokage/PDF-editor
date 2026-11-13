@@ -76,3 +76,39 @@ def test_save_as_then_overwrite_new_path_backs_up_once(simple_pdf, tmp_path):
     d = PdfDocument.open(simple_pdf); out = tmp_path / "out.pdf"
     d.save(out); assert not d.backup_done
     d.save(); assert d.backup_done and (tmp_path / "out.bak.pdf").exists()
+
+
+def test_failed_backup_copy_keeps_existing_backup(simple_pdf, monkeypatch):
+    import shutil
+    bak = simple_pdf.with_name(simple_pdf.stem + ".bak.pdf")
+    bak.write_bytes(b"good old backup")
+    original = simple_pdf.read_bytes()
+
+    def partial(src, dst, *a, **k):
+        with open(dst, "wb") as f: f.write(b"par")
+        raise OSError(5, "io error")
+    monkeypatch.setattr(shutil, "copy2", partial)
+    with pytest.raises(errors.SaveFailedError):
+        PdfDocument.open(simple_pdf).save()
+    assert bak.read_bytes() == b"good old backup" and simple_pdf.read_bytes() == original
+    assert not list(simple_pdf.parent.glob("*.tmp-*")) and not list(simple_pdf.parent.glob("*.baktmp-*"))
+
+
+def test_page_count_mismatch_is_verify_failed(simple_pdf, monkeypatch):
+    import pymupdf
+    one = pymupdf.open(); one.new_page(); data = one.tobytes(); one.close()
+    original = simple_pdf.read_bytes()
+    monkeypatch.setattr(PdfDocument, "to_bytes", lambda self: data)
+    with pytest.raises(errors.SaveFailedError) as e: PdfDocument.open(simple_pdf).save()
+    assert e.value.reason == "verify_failed" and simple_pdf.read_bytes() == original
+    assert not list(simple_pdf.parent.glob("*.tmp-*.pdf"))
+
+
+def test_fsync_failure_keeps_original(simple_pdf, monkeypatch):
+    original = simple_pdf.read_bytes()
+
+    def bad(fd): raise OSError(5, "io error")
+    monkeypatch.setattr("os.fsync", bad)
+    with pytest.raises(errors.SaveFailedError) as e: PdfDocument.open(simple_pdf).save()
+    assert e.value.reason == "other" and simple_pdf.read_bytes() == original
+    assert not list(simple_pdf.parent.glob("*.tmp-*.pdf"))

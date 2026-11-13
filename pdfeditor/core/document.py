@@ -72,7 +72,8 @@ class PdfDocument:
 
     @property
     def page_count(self) -> int:
-        return self.fitz.page_count
+        with self.lock:
+            return self.fitz.page_count
 
     @property
     def is_signed(self) -> bool:
@@ -107,8 +108,9 @@ class PdfDocument:
     def save(self, target: Path | None = None) -> None:
         """target が None または現在のパスと同じなら上書き（初回のみバックアップ）。
         失敗時は SaveFailedError で、元のファイルには触れない。成功後は self.path が保存先になる。"""
-        data = self.to_bytes()
-        pages = self.page_count
+        with self.lock:  # バイト列とページ数を同じ瞬間の状態で取る
+            data = self.to_bytes()
+            pages = self.fitz.page_count
         dest = Path(target) if target is not None else self.path
         if dest is None:
             raise errors.SaveFailedError("保存先が指定されていません。", "other")

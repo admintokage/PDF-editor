@@ -29,10 +29,8 @@ _MESSAGES = {
 }
 
 
-def _fail(reason: str, cause: BaseException | None = None) -> errors.SaveFailedError:
-    err = errors.SaveFailedError(_MESSAGES[reason], reason)
-    err.__cause__ = cause
-    return err
+def _fail(reason: str) -> errors.SaveFailedError:
+    return errors.SaveFailedError(_MESSAGES[reason], reason)
 
 
 def backup_path(target: Path) -> Path:
@@ -42,10 +40,10 @@ def backup_path(target: Path) -> Path:
 
 def _classify(exc: OSError, *, writing_tmp: bool) -> errors.SaveFailedError:
     if exc.errno == errno.ENOSPC or getattr(exc, "winerror", None) == _WINERROR_DISK_FULL:
-        return _fail("disk_full", exc)
+        return _fail("disk_full")
     if isinstance(exc, PermissionError):
-        return _fail("permission" if writing_tmp else "locked", exc)
-    return _fail("other", exc)
+        return _fail("permission" if writing_tmp else "locked")
+    return _fail("other")
 
 
 def _page_count_of(data: bytes) -> int:
@@ -55,10 +53,24 @@ def _page_count_of(data: bytes) -> int:
         doc = pymupdf.open(stream=data, filetype="pdf")
         return doc.page_count
     except Exception as exc:
-        raise _fail("verify_failed", exc) from exc
+        raise _fail("verify_failed") from exc
     finally:
         if doc is not None:
             doc.close()
+
+
+def _write_backup(target: Path) -> None:
+    """一時名に複製してから置き換える。失敗しても既存のバックアップは壊さない。"""
+    bak = backup_path(target)
+    bak_tmp = target.with_name(f"{target.stem}.baktmp-{uuid.uuid4().hex[:8]}.pdf")
+    try:
+        shutil.copy2(target, bak_tmp)
+        os.replace(bak_tmp, bak)
+    finally:
+        try:
+            bak_tmp.unlink(missing_ok=True)
+        except OSError:
+            pass
 
 
 def write_atomically(
@@ -76,6 +88,9 @@ def write_atomically(
     try:
         try:
             tmp.write_bytes(data)
+            with open(tmp, "r+b") as f:  # ディスクに確実に書き出してから置き換える
+                f.flush()
+                os.fsync(f.fileno())
         except OSError as exc:
             raise _classify(exc, writing_tmp=True) from exc
         try:
@@ -87,7 +102,7 @@ def write_atomically(
         made_backup = False
         try:
             if backup and target.exists():
-                shutil.copy2(target, backup_path(target))
+                _write_backup(target)
                 made_backup = True
             os.replace(tmp, target)
         except OSError as exc:
