@@ -249,6 +249,6 @@ def _run_app(argv: list[str]) -> int:
 
     window = MainWindow()
     window.show()
-    if len(argv) > 1:
-        window.open_path(Path(argv[1]))
+    for arg in argv[1:]:  # 実行ファイルに複数のファイルをドロップすると、それぞれタブで開く
+        window.open_path(Path(arg))
     return app.exec()

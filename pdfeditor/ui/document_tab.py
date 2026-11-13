@@ -135,7 +135,18 @@ class DocumentTab(QWidget):
             self.thumbnails.refresh()
 
     def set_active(self, active: bool) -> None:
-        """表示中のタブかどうか。"""
+        """表示しなくなったら、ページ表示とサムネイルの画像を手放し、描画サービスの
+        キャッシュを空にする（描画中・配送待ちの結果も捨てる）。描画スレッドは止めずに待たせる。
+        表示に戻ったら、見えている分を頼み直す（F-85e）。"""
+        if self._shut_down:
+            return
+        if active:
+            self.page_view.request_images()
+            self.thumbnails.request_images()
+            return
+        self.page_view.release_images()
+        self.thumbnails.release_images()
+        self.render_service.invalidate()  # 全消去。キャッシュと、遅れて届く結果を捨てる
 
     # --- ページ操作 -------------------------------------------------------
     def _run(self, command) -> bool:

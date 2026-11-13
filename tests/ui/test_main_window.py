@@ -123,11 +123,12 @@ def test_drop_ignores_non_pdf(qtbot, tmp_path):
     assert w.doc is None
 
 
-def test_second_open_uses_new_window(qtbot, simple_pdf, mixed_size_pdf):
+def test_second_open_uses_new_tab(qtbot, simple_pdf, mixed_size_pdf):
+    """F-85a: 2 つ目は同じウィンドウの新しいタブで開き、そのタブを表示する。"""
     w = MainWindow(); qtbot.addWidget(w)
     w.open_path(simple_pdf); w.open_path(mixed_size_pdf)
-    assert w.doc.path == simple_pdf and len(MainWindow.instances) == 2
-    assert MainWindow.instances[1].doc.path == mixed_size_pdf
+    assert w.doc.path == mixed_size_pdf and len(MainWindow.instances) == 1
+    assert [t.doc.path for t in w.tabs()] == [simple_pdf, mixed_size_pdf]
 
 
 def test_opening_already_open_path_does_not_duplicate(qtbot, simple_pdf):

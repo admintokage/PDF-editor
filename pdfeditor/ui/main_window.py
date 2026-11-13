@@ -325,6 +325,8 @@ class MainWindow(QMainWindow):
         return None
 
     def open_path(self, path: Path) -> bool:
+        """新しいタブで開いて、そのタブを表示する。すでに開いているファイルは、そのタブ
+        （別のウィンドウにあればそのウィンドウ）に切り替えるだけ。"""
         if self._saving:
             return False
         existing = self._tab_showing(path)
@@ -335,13 +337,6 @@ class MainWindow(QMainWindow):
             window.raise_()
             window.activateWindow()
             return True
-        if self.tabs():  # 文書のあるウィンドウは触らず、新しいウィンドウで開く
-            window = MainWindow()
-            window.show()
-            if window.open_path(path):
-                return True
-            window.close()
-            return False
         doc = self._open_with_prompts(path)
         if doc is None:
             return False

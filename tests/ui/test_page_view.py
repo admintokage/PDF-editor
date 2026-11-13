@@ -363,3 +363,13 @@ def test_scroll_500_pages_end_to_end(qtbot, big_pdf):
         assert len(v._images) <= len(v.visible_pages()) + 2
     assert v.current_page() == 499 and len(seen) > 400
     assert max(i for i, _ in asked) == 499
+
+
+def test_release_images_drops_held_images_until_requested(qtbot, simple_pdf):
+    """表示していないタブのページ表示は画像を手放す（F-85e）。頼み直すと描き直す。"""
+    v = make_view(qtbot, simple_pdf)
+    qtbot.waitUntil(lambda: bool(v._images))
+    v.release_images()
+    assert v._images == {}
+    v.request_images()
+    qtbot.waitUntil(lambda: set(v.visible_pages()) <= set(v._images))

@@ -391,3 +391,13 @@ def test_ask_blank_page_cancel_returns_none(qtbot, monkeypatch):
     assert real_ask_blank_page(None, (595, 842)) is None
     monkeypatch.setattr(dialogs.BlankPageDialog, "exec", lambda self: QDialog.DialogCode.Accepted)
     assert real_ask_blank_page(None, (595, 842)) == (595, 842)
+
+
+def test_release_images_drops_thumbnails_until_requested(qtbot, simple_pdf):
+    """表示していないタブのサムネイルは画像を手放す（F-85e）。頼み直すと描き直す。"""
+    w = open_window(qtbot, simple_pdf)
+    qtbot.waitUntil(lambda: _loaded_rows(w.thumbnails) == {0, 1, 2})
+    w.thumbnails.release_images()
+    assert _loaded_rows(w.thumbnails) == set() and w.thumbnails.model().rowCount() == 3
+    w.thumbnails.request_images()
+    qtbot.waitUntil(lambda: _loaded_rows(w.thumbnails) == {0, 1, 2})

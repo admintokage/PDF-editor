@@ -113,6 +113,17 @@ class PageView(QAbstractScrollArea):
         self._request_visible()  # invalidate で待ち行列は捨てられている
         self.viewport().update()
 
+    def release_images(self) -> None:
+        """持っている画像を手放す（表示していないタブのメモリを空ける）。配置と位置は保つ。"""
+        self._render_timer.stop()
+        self._images.clear()
+        self._near = set()
+
+    def request_images(self) -> None:
+        """見えているページの画像を頼み直す（release_images の後、表示に戻った時）。"""
+        self._request_visible()
+        self.viewport().update()
+
     def _read_sizes(self) -> None:
         if self.doc is None:
             self._sizes = []

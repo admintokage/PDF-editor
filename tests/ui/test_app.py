@@ -32,6 +32,15 @@ def test_main_starts_and_opens_argv(simple_pdf, _isolated):
     assert [w.doc.page_count for w in MainWindow.instances] == [3] and _isolated == []
 
 
+def test_main_opens_every_argv_pdf_in_tabs(simple_pdf, mixed_size_pdf, _isolated):
+    """実行ファイルに複数の PDF をドロップした時（F-85a）。"""
+    assert app.main(["PDF-editor", str(simple_pdf), str(mixed_size_pdf)]) == 0
+    assert len(MainWindow.instances) == 1
+    window = MainWindow.instances[0]
+    assert [t.doc.path for t in window.tabs()] == [simple_pdf, mixed_size_pdf]
+    assert window.current_tab() is window.tabs()[1] and _isolated == []
+
+
 def test_main_with_broken_argv_file_shows_error_and_keeps_running(tmp_path, monkeypatch, _isolated):
     import pymupdf
     doc = pymupdf.open(); [doc.new_page() for _ in range(3)]; raw = doc.tobytes(); doc.close()

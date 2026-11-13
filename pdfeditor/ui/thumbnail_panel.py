@@ -82,6 +82,12 @@ class ThumbnailModel(QAbstractListModel):
     def thumb_zoom(self, row: int) -> float:
         return self._zooms[row]
 
+    def clear_images(self) -> None:
+        self._images.clear()
+        if self._sizes:
+            self.dataChanged.emit(self.index(0), self.index(len(self._sizes) - 1),
+                                  [Qt.ItemDataRole.DecorationRole])
+
     def image(self, row: int) -> QImage | None:
         return self._images.get(row)
 
@@ -341,6 +347,17 @@ class ThumbnailPanel(QListView):
                             key=lambda r: self.visualRect(model.index(r)).bottom())
         last = bisect_right(range(count), self.viewport().height(), key=self._row_top) - 1
         return range(max(first - ROW_MARGIN, 0), min(last + 1 + ROW_MARGIN, count))
+
+    def release_images(self) -> None:
+        """持っている画像を手放し、頼み直しも止める（表示していないタブのメモリを空ける）。"""
+        self._request_timer.stop()
+        self._attempts.clear()
+        self.model().clear_images()
+
+    def request_images(self) -> None:
+        """見えている行の画像を頼み直す（release_images の後、表示に戻った時）。"""
+        self._attempts.clear()
+        self._request_visible()
 
     def _request_visible(self) -> None:
         self._request_timer.stop()
