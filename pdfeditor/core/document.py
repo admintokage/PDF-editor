@@ -15,6 +15,7 @@ _PERM_OWNER_BIT = 4  # authenticate() の戻り値で、権限パスワード一
 _SCRUB_FAILED = ("削除したページの一部をファイルから取り除けなかったため、保存を中止しました。"
                  "元のファイルはそのままです。")
 _WRITE_FAILED = "保存できませんでした。元のファイルはそのままです。別の名前で保存してみてください。"
+_EXPORT_FAILED = "ページをコピーできませんでした。PDF が壊れている可能性があります。"
 
 
 @dataclass(frozen=True)
@@ -320,6 +321,45 @@ class PdfDocument:
                 f"「{path.name}」を開けません。ファイルが見つからないか、読み取れません。"
             ) from exc
         return self.insert_from_bytes(data, at, password)
+
+    def export_pages(self, indices: list[int]) -> bytes:
+        """ページ indices だけを番号の小さい順に含む、新しい PDF のバイト列（暗号化なし）。
+        コピー・切り取りでアプリ内のクリップボードに置く（メモリの中だけで使い、ファイルに書かない）。
+
+        PyMuPDF の insert_pdf は取り込み元を書き換える（フォームの /Fields を空にする、注釈の
+        /P・/Popup を外すなど。2 回目の取り込みではフォームの部品が落ちる）ので、生きている文書
+        ではなく、その写しから 1 回で取り込む。写しは lock の中でバイト列にし、残りは lock の外で
+        行う。写しからは指定していないページを、ページ削除と同じくフォーム部品を AcroForm から
+        外してから取り除く（ほかのページの部品と親を共有する部品から、取り除いたページへ
+        たどらないように）。受け継がれた MediaBox・Rotate・Resources は insert_pdf がページに
+        書き写す。範囲外は IndexError、空・重複は ValueError。"""
+        with self.lock:
+            self._check_indices(indices)
+            if not indices:
+                raise ValueError("ページが指定されていません。")
+            try:
+                data = self.fitz.tobytes(encryption=pymupdf.PDF_ENCRYPT_NONE)
+            except Exception as exc:  # noqa: BLE001
+                raise errors.PageOperationError(_EXPORT_FAILED) from exc
+        keep = set(indices)
+        src = out = None
+        try:
+            src = pymupdf.open(stream=data, filetype="pdf")
+            others = [i for i in range(src.page_count) if i not in keep]
+            if others:
+                widgets = [xref for i in others for xref, kind, _ in src[i].annot_xrefs()
+                           if kind == pymupdf.PDF_ANNOT_WIDGET]
+                page_detach.remove_form_fields(src, widgets, [])
+                src.delete_pages(others)
+            out = pymupdf.open()
+            out.insert_pdf(src)
+            return out.tobytes(garbage=3, deflate=True)
+        except Exception as exc:  # noqa: BLE001
+            raise errors.PageOperationError(_EXPORT_FAILED) from exc
+        finally:
+            for d in (out, src):
+                if d is not None:
+                    d.close()
 
     @staticmethod
     def _check_multiple_of_90(value: int) -> None:
