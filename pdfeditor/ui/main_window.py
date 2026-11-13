@@ -15,7 +15,7 @@ from pdfeditor.core.errors import (
     PdfEditorError,
     WrongPasswordError,
 )
-from pdfeditor.ui import dialogs, messages
+from pdfeditor.ui import dialogs, messages, page_clipboard
 from pdfeditor.ui.document_tab import DocumentTab
 
 log = logging.getLogger(__name__)
@@ -70,6 +70,7 @@ class MainWindow(QMainWindow):
         self._build_menus()
         self.tab_widget.currentChanged.connect(self._on_current_changed)
         self.tab_widget.tabCloseRequested.connect(self.close_tab)
+        page_clipboard.clipboard().changed.connect(self._update_page_actions)
         self._on_current_changed()
         MainWindow.instances.append(self)
 
@@ -115,6 +116,10 @@ class MainWindow(QMainWindow):
         # ページメニューとサムネイルの右クリックメニューは同じ QAction を使う。
         # 各タブのサムネイル一覧に足すので、ここでは並び（区切りを含む）を作っておく
         self.page_menu = bar.addMenu(messages.MENU_PAGE)
+        self.cut_action = self._action(messages.ACTION_CUT_PAGES, "Ctrl+X", self.cut_selected_pages)
+        self.copy_action = self._action(
+            messages.ACTION_COPY_PAGES, "Ctrl+C", self.copy_selected_pages)
+        self.paste_action = self._action(messages.ACTION_PASTE_PAGES, "Ctrl+V", self.paste_pages)
         self.delete_pages_action = self._action(
             messages.ACTION_DELETE_PAGES, "Delete", self.delete_selected_pages)
         self.insert_blank_action = self._action(
@@ -125,9 +130,13 @@ class MainWindow(QMainWindow):
             messages.ACTION_ROTATE_RIGHT, "Ctrl+R", lambda: self.rotate_selected(90))
         self.rotate_left_action = self._action(
             messages.ACTION_ROTATE_LEFT, "Ctrl+Shift+R", lambda: self.rotate_selected(-90))
-        # Delete はページ一覧にフォーカスがある時だけ効かせる
-        self.delete_pages_action.setShortcutContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
-        groups = [[self.delete_pages_action],
+        # これらのキーはページ一覧にフォーカスがある時だけ効かせる（ダイアログや、後の段階の
+        # 文字の編集でのコピー・貼り付けを横取りしない）。メニューにはキーを表示する
+        for action in (self.cut_action, self.copy_action, self.paste_action,
+                       self.delete_pages_action):
+            action.setShortcutContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
+        groups = [[self.cut_action, self.copy_action, self.paste_action],
+                  [self.delete_pages_action],
                   [self.insert_blank_action, self.insert_pdf_action],
                   [self.rotate_right_action, self.rotate_left_action]]
         self._thumbnail_actions: list[QAction] = []
@@ -179,14 +188,16 @@ class MainWindow(QMainWindow):
         self._update_page_actions()
 
     def _update_page_actions(self, *_args) -> None:
-        """文書があれば追加・挿入、さらに選択があれば削除・回転を使える。"""
+        """文書があれば追加・挿入、選択があれば切り取り・コピー・削除・回転、クリップボードに
+        ページがあれば貼り付けを使える。保存中はどれも使えない。"""
         tab = self.current_tab()
         has_doc = tab is not None and not self._saving
         has_selection = has_doc and bool(tab.thumbnails.selected_pages())
         self.insert_blank_action.setEnabled(has_doc)
         self.insert_pdf_action.setEnabled(has_doc)
-        for action in (self.delete_pages_action, self.rotate_right_action,
-                       self.rotate_left_action):
+        self.paste_action.setEnabled(has_doc and page_clipboard.clipboard().count() > 0)
+        for action in (self.cut_action, self.copy_action, self.delete_pages_action,
+                       self.rotate_right_action, self.rotate_left_action):
             action.setEnabled(has_selection)
 
     # --- タブ -------------------------------------------------------------
@@ -250,6 +261,8 @@ class MainWindow(QMainWindow):
     def _on_saving_changed(self, saving: bool) -> None:
         """保存中はファイルを開く・保存・閉じる・タブの切り替え・ページ操作・元に戻すを止める。"""
         self._saving = saving
+        for tab in self.tabs():
+            tab.set_blocked(saving)
         self._update_actions()
 
     def close_tab(self, index: int) -> bool:
@@ -294,6 +307,15 @@ class MainWindow(QMainWindow):
 
     def rotate_selected(self, delta: int) -> None:
         self._on_tab("rotate_selected", delta)
+
+    def copy_selected_pages(self) -> bool:
+        return bool(self._on_tab("copy_selected_pages"))
+
+    def cut_selected_pages(self) -> bool:
+        return bool(self._on_tab("cut_selected_pages"))
+
+    def paste_pages(self) -> bool:
+        return bool(self._on_tab("paste_pages"))
 
     def save(self) -> bool:
         return bool(self._on_tab("save"))
@@ -425,5 +447,7 @@ class MainWindow(QMainWindow):
             self._remove_tab(tab)
         if self in MainWindow.instances:
             MainWindow.instances.remove(self)
-        self._closed = True
+        if not self._closed:  # アプリに 1 つのクリップボードから、閉じたウィンドウを切り離す
+            self._closed = True
+            page_clipboard.clipboard().changed.disconnect(self._update_page_actions)
         super().closeEvent(event)

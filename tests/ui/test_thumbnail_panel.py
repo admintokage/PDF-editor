@@ -327,13 +327,15 @@ def test_page_actions_shared_and_shortcuts(qtbot, simple_pdf):
     from pdfeditor.ui.main_window import MainWindow
     empty = MainWindow(); qtbot.addWidget(empty)
     w = open_window(qtbot, simple_pdf)  # サムネイル一覧はタブの中にあるので、文書を開いて調べる
-    actions = [w.delete_pages_action, w.insert_blank_action, w.insert_pdf_action,
+    # ページの切り取り・コピー・貼り付け（F-86）が先頭に加わった
+    actions = [w.cut_action, w.copy_action, w.paste_action,
+               w.delete_pages_action, w.insert_blank_action, w.insert_pdf_action,
                w.rotate_right_action, w.rotate_left_action]
     assert [a for a in w.page_menu.actions() if not a.isSeparator()] == actions
     assert [a for a in w.thumbnails.actions() if not a.isSeparator()] == actions
     assert w.thumbnails.contextMenuPolicy() == Qt.ContextMenuPolicy.ActionsContextMenu
     assert [a.shortcut().toString() for a in actions] == [
-        "Del", "", "", "Ctrl+R", "Ctrl+Shift+R"]
+        "Ctrl+X", "Ctrl+C", "Ctrl+V", "Del", "", "", "Ctrl+R", "Ctrl+Shift+R"]
     empty_actions = [empty.delete_pages_action, empty.insert_blank_action,
                      empty.insert_pdf_action, empty.rotate_right_action, empty.rotate_left_action]
     assert not any(a.isEnabled() for a in empty_actions)

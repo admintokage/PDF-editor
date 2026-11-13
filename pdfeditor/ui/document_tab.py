@@ -10,16 +10,19 @@ from PySide6.QtWidgets import QFileDialog, QProgressDialog, QSplitter, QVBoxLayo
 from pdfeditor.core.document import PdfDocument
 from pdfeditor.core.errors import (
     NotAPdfError,
+    PageOperationError,
     PasswordRequiredError,
     PdfEditorError,
     SaveFailedError,
     WrongPasswordError,
 )
-from pdfeditor.ui import dialogs, messages
+from pdfeditor.ui import dialogs, messages, page_clipboard
 from pdfeditor.ui.page_commands import (
+    CutPagesCommand,
     DeletePagesCommand,
     InsertBlankCommand,
     InsertPdfCommand,
+    PastePagesCommand,
     RotatePagesCommand,
     make_undo_stack,
     push_command,
@@ -69,6 +72,7 @@ class DocumentTab(QWidget):
         self.doc = doc
         self.password_retry = False  # dialogs.ask_password が「違う」の注記に使う
         self._saving = False
+        self._blocked = False
         self._shut_down = False
         self._save_result: SaveFailedError | None = None
         self._save_loop: QEventLoop | None = None
@@ -118,8 +122,12 @@ class DocumentTab(QWidget):
     def is_saving(self) -> bool:
         return self._saving
 
+    def set_blocked(self, blocked: bool) -> None:
+        """ウィンドウの別のタブが保存中の間、このタブも操作を受け付けない。"""
+        self._blocked = blocked
+
     def _busy(self) -> bool:
-        return self._saving or self._shut_down
+        return self._saving or self._blocked or self._shut_down
 
     def _on_clean_changed(self, clean: bool) -> None:
         self.modified_changed.emit(not clean)
@@ -227,6 +235,54 @@ class DocumentTab(QWidget):
         if self._busy() or not selected:
             return
         self._run(RotatePagesCommand(self.doc, selected, delta, self.document_changed.emit))
+
+    # --- コピー・切り取り・貼り付け（F-86） ---------------------------------
+    def _export(self, selected: list[int]) -> bytes | None:
+        try:
+            return self.doc.export_pages(selected)
+        except PdfEditorError as err:
+            dialogs.show_error(self, err)
+            return None
+
+    def copy_selected_pages(self) -> bool:
+        selected = self.thumbnails.selected_pages()
+        if self._busy() or not selected:
+            return False
+        data = self._export(selected)
+        if data is None:
+            return False
+        page_clipboard.clipboard().set_pages(data, len(selected))
+        return True
+
+    def cut_selected_pages(self) -> bool:
+        """先に書き出し、次に（元に戻せる形で）取り除き、両方できた時だけクリップボードに置く。
+        どちらかに失敗したら、文書もクリップボードも試す前のまま。"""
+        selected = self.thumbnails.selected_pages()
+        if self._busy() or not selected:
+            return False
+        if len(selected) >= self.doc.page_count:  # F-86e（削除と同じ扱いで、理由を表示する）
+            dialogs.show_error(self, PageOperationError(messages.CUT_LAST_PAGE))
+            return False
+        data = self._export(selected)
+        if data is None:
+            return False
+        if not self._run(CutPagesCommand(self.doc, selected, self.document_changed.emit)):
+            return False
+        page_clipboard.clipboard().set_pages(data, len(selected))
+        self.thumbnails.select_pages([min(selected[0], self.doc.page_count - 1)])
+        return True
+
+    def paste_pages(self) -> bool:
+        """選択中の最後のページの次（選択がなければ末尾）に貼り付け、貼り付けたページを選ぶ。"""
+        data = page_clipboard.clipboard().data()
+        if self._busy() or data is None:
+            return False
+        at = self._insert_position()
+        before = self.doc.page_count
+        if not self._run(PastePagesCommand(self.doc, data, at, self.document_changed.emit)):
+            return False
+        self._show_inserted(at, self.doc.page_count - before)
+        return True
 
     # --- 保存 -------------------------------------------------------------
     def save(self) -> bool:
