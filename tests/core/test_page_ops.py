@@ -3,7 +3,7 @@ import pytest
 
 from pdfeditor.core import errors
 from pdfeditor.core.document import PAGE_SIZES, PdfDocument, page_order_after_move
-from tests.helpers import labels
+from tests.helpers import labels, page_labels
 
 
 def test_page_order_after_move():
@@ -159,3 +159,44 @@ def test_ops_survive_save(big_pdf, tmp_path):
     d = PdfDocument.open(big_pdf(5)); d.move_pages([4], 0); d.delete_pages([1]); d.rotate_by([0], 90)
     out = tmp_path / "o.pdf"; d.save(out); r = PdfDocument.open(out)
     assert labels(r) == [5, 2, 3, 4] and r.page_rotation(0) == 90
+
+
+# ---- ページラベル: 削除・移動・挿入を元に戻すと、ラベルも /PageLabels も元どおり ----
+
+def _labelled(tmp_path, n: int = 8) -> PdfDocument:
+    doc = pymupdf.open()
+    for i in range(n):
+        doc.new_page().insert_text((72, 72), f"Page {i + 1}")
+    doc.xref_set_key(doc.pdf_catalog(), "PageLabels",
+                     "<</Nums[0<</S/r>>2<</S/D/P(ch-)>>5<</S/A/St 3>>]>>")
+    doc.save(tmp_path / "labels.pdf")
+    doc.close()
+    return PdfDocument.open(tmp_path / "labels.pdf")
+
+
+@pytest.mark.parametrize("indices", [[2], [0, 4], [0], [7], [1, 2, 3, 4, 5, 6]],
+                         ids=["single", "multi", "first", "last", "most"])
+def test_delete_undo_restores_page_labels(tmp_path, indices):
+    d = _labelled(tmp_path); before = page_labels(d.fitz)
+    detached = d.delete_pages(indices)
+    after_delete = page_labels(d.fitz)
+    d.restore_pages(detached); assert page_labels(d.fitz) == before
+    d.restore_pages(d.delete_pages(indices)); assert page_labels(d.fitz) == before  # 何度でも
+    assert d.delete_pages(indices) and page_labels(d.fitz) == after_delete       # やり直しも同じ
+
+
+def test_move_undo_keeps_page_labels(tmp_path):
+    d = _labelled(tmp_path); before = page_labels(d.fitz)
+    order = page_order_after_move(8, [1], 6)
+    d.move_pages([1], 6)
+    d.reorder([order.index(i) for i in range(8)])
+    assert labels(d) == list(range(1, 9)) and page_labels(d.fitz) == before
+
+
+@pytest.mark.parametrize("at", [0, 3, 8])
+def test_insert_undo_restores_page_labels(tmp_path, simple_pdf, at):
+    d = _labelled(tmp_path); before = page_labels(d.fitz)
+    d.insert_blank(at, 100, 100); d.delete_pages([at])
+    assert page_labels(d.fitz) == before
+    n = d.insert_from_file(simple_pdf, at); d.delete_pages(list(range(at, at + n)))
+    assert page_labels(d.fitz) == before

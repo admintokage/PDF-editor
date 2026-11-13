@@ -16,6 +16,7 @@ PyMuPDF の公開 API にない操作（配列の途中への出し入れ、既�
 への挿入）は、PyMuPDF 同梱の mupdf 低レベル API で行う。PyMuPDF の内部関数
 _as_pdf_document と _reset_page_refs はこのモジュールでだけ使う。
 """
+import re
 from dataclasses import dataclass, field
 
 import pymupdf
@@ -46,6 +47,8 @@ class DetachedPages:
     changed_objects: dict[int, str] = field(default_factory=dict)  # 書き換え前のオブジェクト
     # 削除で PyMuPDF が行き先を外したしおりの項目（保存の掃除で、削除ページを指していたと分かるように）
     untargeted_outline: frozenset[int] = frozenset()
+    # 削除前のページラベル（MuPDF が削除で書き換えるので、元に戻すときにこの形へ戻す）
+    page_labels: tuple | None = None
 
 
 def _array(pdf, owner: int):
@@ -127,6 +130,46 @@ def only_changed(doc: pymupdf.Document, before: dict[int, str]) -> dict[int, str
 def restore_objects(doc: pymupdf.Document, saved: dict[int, str]) -> None:
     for xref, text in saved.items():
         doc.update_object(xref, text)
+
+
+PageLabels = tuple[str, dict[int, str]] | None  # (カタログの値, 中の間接オブジェクト) / なし
+
+
+def page_labels_state(doc: pymupdf.Document) -> PageLabels:
+    """カタログの /PageLabels（数値ツリー）を、中の間接オブジェクトごと今の形で控える。
+    MuPDF はページの削除・挿入でこのツリーを書き換える（範囲をずらす、なかったツリーを作る）。"""
+    kind, value = doc.xref_get_key(doc.pdf_catalog(), "PageLabels")
+    if kind == "null":
+        return None
+    objects: dict[int, str] = {}
+    todo = [value]
+    while todo and len(objects) < 10000:
+        for m in re.finditer(r"(?<![\w.])(\d+)\s+\d+\s+R\b", todo.pop()):
+            x = int(m.group(1))
+            if x not in objects and 0 < x < doc.xref_length():
+                objects[x] = doc.xref_object(x, compressed=True)
+                todo.append(objects[x])
+    return value, objects
+
+
+def restore_page_labels(doc: pymupdf.Document, state: PageLabels) -> None:
+    for xref, text in (state[1] if state else {}).items():
+        doc.update_object(xref, text)
+    doc.xref_set_key(doc.pdf_catalog(), "PageLabels", state[0] if state else "null")
+
+
+def drop_shadowed_labels(doc: pymupdf.Document) -> None:
+    """/PageLabels の（入れ子でない）/Nums で同じページ番号の範囲が重なったら、後のもの（MuPDF が
+    使う方）だけを残す。挿入したページを削除すると MuPDF の書き換えで重なる。ラベルは変わらない。"""
+    labels = mupdf.pdf_dict_getp(mupdf.pdf_trailer(_pdf(doc)), "Root/PageLabels/Nums")
+    if not mupdf.pdf_is_array(labels):
+        return
+    n = mupdf.pdf_array_len(labels)
+    for i in reversed(range(0, n - 3, 2)):
+        a, b = mupdf.pdf_array_get(labels, i), mupdf.pdf_array_get(labels, i + 2)
+        if mupdf.pdf_is_int(a) and mupdf.pdf_is_int(b) and mupdf.pdf_to_int(a) == mupdf.pdf_to_int(b):
+            mupdf.pdf_array_delete(labels, i + 1)
+            mupdf.pdf_array_delete(labels, i)
 
 
 INHERITABLE_KEYS = ("Resources", "MediaBox", "CropBox", "Rotate")

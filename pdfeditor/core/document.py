@@ -243,21 +243,25 @@ class PdfDocument:
             doomed = set(order)
             keep = [i for i in range(self.fitz.page_count) if i not in doomed]
             page_xrefs = [self._page(i).xref for i in order]
+            still_shown = {self._page(i).xref for i in keep}  # 同じページオブジェクトが 2 回ある
             widgets = [
-                xref for i in order for xref, kind, _ in self._page(i).annot_xrefs()
+                xref for i in order if self._page(i).xref not in still_shown
+                for xref, kind, _ in self._page(i).annot_xrefs()
                 if kind == pymupdf.PDF_ANNOT_WIDGET
             ]
             outline = set(self.fitz.get_outline_xrefs())
             before = page_detach.objects_touched_by_delete(self.fitz, keep)
+            labels = page_detach.page_labels_state(self.fitz)
             removals: list = []
             detached = False
             try:
                 page_detach.remove_form_fields(self.fitz, widgets, removals)
                 self.fitz.delete_pages(order)
                 detached = True
+                page_detach.drop_shadowed_labels(self.fitz)
                 changed = page_detach.only_changed(self.fitz, before)
                 result = DetachedPages(order, page_xrefs, removals, changed,
-                                       frozenset(outline.intersection(changed)))
+                                       frozenset(outline.intersection(changed)), labels)
                 self._detached.append(result)
                 return result
             except BaseException:
@@ -266,23 +270,33 @@ class PdfDocument:
                     page_detach.insert_page_objects(self.fitz, order, page_xrefs)
                 page_detach.restore_form_fields(self.fitz, removals)
                 page_detach.restore_objects(self.fitz, before)
+                page_detach.restore_page_labels(self.fitz, labels)
                 raise
 
     def restore_pages(self, detached: DetachedPages) -> None:
         """delete_pages で外したページを、同じオブジェクトのまま元の位置に戻す。フォーム部品、
-        ほかのページから削除ページへのリンク、しおりの行き先も削除前の形に戻す。
+        ほかのページから削除ページへのリンク、しおりの行き先、ページラベルも削除前の形に戻す。
         delete_pages の後に行った変更をすべて元に戻してから呼ぶこと（元に戻すの順序）。"""
         with self.lock:
             page_detach.insert_page_objects(self.fitz, detached.indices, detached.page_xrefs)
             page_detach.restore_form_fields(self.fitz, detached.removals)
             page_detach.restore_objects(self.fitz, detached.changed_objects)
+            page_detach.restore_page_labels(self.fitz, detached.page_labels)
             self._detached = [d for d in self._detached if d is not detached]
 
     def insert_blank(self, at: int, width: float, height: float) -> None:
         with self.lock:
             self._check_position(at)
             self._ensure_flat_tree()  # 置いた先のノードの向きや切り抜きを受け継がないように
+            unlabelled = page_detach.page_labels_state(self.fitz) is None
             self.fitz.new_page(pno=at, width=width, height=height)
+            self._keep_unlabelled(unlabelled)
+
+    def _keep_unlabelled(self, unlabelled: bool) -> None:
+        """ページラベルのない文書の先頭にページを挿入すると、MuPDF がラベルを作る
+        （1, 1, 2, ... と表示される）。もともとなければ消す（lock を保持して呼ぶ）。"""
+        if unlabelled:
+            page_detach.restore_page_labels(self.fitz, None)
 
     def default_blank_size(self, at: int) -> tuple[float, float]:
         """at-1 のページ（なければ at）の大きさ。"""
@@ -298,8 +312,10 @@ class PdfDocument:
                 self._ensure_flat_tree()
                 count = src.page_count
                 before = self.fitz.page_count
+                unlabelled = page_detach.page_labels_state(self.fitz) is None
                 try:
                     self.fitz.insert_pdf(src, start_at=at)
+                    self._keep_unlabelled(unlabelled)
                 except Exception as exc:
                     # 途中まで入ったページがあれば取り除き、文書を挿入前に戻す
                     added = self.fitz.page_count - before
