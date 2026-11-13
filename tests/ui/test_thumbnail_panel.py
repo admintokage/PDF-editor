@@ -336,7 +336,8 @@ def test_page_actions_shared_and_shortcuts(qtbot, simple_pdf):
     assert w.thumbnails.contextMenuPolicy() == Qt.ContextMenuPolicy.ActionsContextMenu
     assert [a.shortcut().toString() for a in actions] == [
         "Ctrl+X", "Ctrl+C", "Ctrl+V", "Del", "", "", "Ctrl+R", "Ctrl+Shift+R"]
-    empty_actions = [empty.delete_pages_action, empty.insert_blank_action,
+    empty_actions = [empty.cut_action, empty.copy_action, empty.paste_action,
+                     empty.delete_pages_action, empty.insert_blank_action,
                      empty.insert_pdf_action, empty.rotate_right_action, empty.rotate_left_action]
     assert not any(a.isEnabled() for a in empty_actions)
 

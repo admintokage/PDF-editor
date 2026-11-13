@@ -65,6 +65,8 @@ PASSWORD_WRONG = "パスワードが違います。もう一度入力してく�
 # 保存
 SAVE_DIALOG_TITLE = "名前を付けて保存"
 SAVING_TEXT = "保存しています…"
+SAVE_TARGET_OPEN_ELSEWHERE = ("このファイルは別のタブで開いています。"
+                             "別の名前で保存するか、先にそのタブを閉じてください。")
 SAVE_UNEXPECTED = "保存できませんでした。予期しないエラーが発生しました。"
 UNSAVED_TITLE = "変更の保存"
 UNSAVED_TEXT = "「{name}」への変更を保存しますか？"

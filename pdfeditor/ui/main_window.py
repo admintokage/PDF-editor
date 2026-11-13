@@ -4,7 +4,7 @@ import logging
 from pathlib import Path
 
 from PySide6.QtCore import Qt, Signal
-from PySide6.QtGui import QAction, QKeySequence, QUndoGroup
+from PySide6.QtGui import QAction, QUndoGroup
 from PySide6.QtWidgets import QFileDialog, QLabel, QMainWindow, QStackedWidget, QTabWidget
 
 from pdfeditor.core.document import PdfDocument
@@ -16,16 +16,10 @@ from pdfeditor.core.errors import (
     WrongPasswordError,
 )
 from pdfeditor.ui import dialogs, messages, page_clipboard
-from pdfeditor.ui.document_tab import DocumentTab
+from pdfeditor.ui.document_tab import DocumentTab, same_file
+from pdfeditor.ui.window_actions import build_menus
 
 log = logging.getLogger(__name__)
-
-
-def _same_file(a: Path, b: Path) -> bool:
-    try:
-        return a.resolve() == b.resolve()
-    except OSError:
-        return a == b
 
 
 def _current(name: str) -> property:
@@ -78,7 +72,7 @@ class MainWindow(QMainWindow):
         self.setCentralWidget(self._central)
 
         self.undo_group = QUndoGroup(self)
-        self._build_menus()
+        build_menus(self)
         self.tab_widget.currentChanged.connect(self._on_current_changed)
         self.tab_widget.tabCloseRequested.connect(self.close_tab)
         page_clipboard.clipboard().changed.connect(self._update_page_actions)
@@ -86,93 +80,6 @@ class MainWindow(QMainWindow):
         MainWindow.instances.append(self)
 
     # --- メニュー ---------------------------------------------------------
-    def _action(self, text: str, shortcut: str | None, slot, menu=None) -> QAction:
-        action = QAction(text, self)
-        if shortcut:
-            action.setShortcut(QKeySequence(shortcut))
-        action.triggered.connect(lambda _checked=False: slot())  # checked を slot に渡さない
-        if menu is not None:
-            menu.addAction(action)
-        return action
-
-    def _build_menus(self) -> None:
-        bar = self.menuBar()
-        file_menu = bar.addMenu(messages.MENU_FILE)
-        self.open_action = self._action(messages.ACTION_OPEN, "Ctrl+O", self._choose_and_open,
-                                        file_menu)
-        self.close_tab_action = self._action(messages.ACTION_CLOSE_TAB, "Ctrl+W",
-                                             self.close_current_tab, file_menu)
-        file_menu.addSeparator()
-        self.save_action = self._action(messages.ACTION_SAVE, "Ctrl+S", self.save, file_menu)
-        self.save_as_action = self._action(messages.ACTION_SAVE_AS, "Ctrl+Shift+S", self.save_as,
-                                           file_menu)
-        file_menu.addSeparator()
-        self.quit_action = self._action(messages.ACTION_QUIT, None, self.close, file_menu)
-
-        # タブの切り替え（メニューには出さない）
-        self.next_tab_action = self._action(messages.ACTION_NEXT_TAB, None, self.next_tab)
-        self.next_tab_action.setShortcuts(QKeySequence.StandardKey.NextChild)
-        self.prev_tab_action = self._action(messages.ACTION_PREV_TAB, None, self.previous_tab)
-        self.prev_tab_action.setShortcuts(QKeySequence.StandardKey.PreviousChild)
-        self.addActions([self.next_tab_action, self.prev_tab_action])
-
-        edit_menu = bar.addMenu(messages.MENU_EDIT)
-        self.undo_action = self.undo_group.createUndoAction(self, messages.UNDO_PREFIX)
-        self.undo_action.setShortcut(QKeySequence("Ctrl+Z"))
-        self.redo_action = self.undo_group.createRedoAction(self, messages.REDO_PREFIX)
-        self.redo_action.setShortcut(QKeySequence("Ctrl+Y"))
-        edit_menu.addAction(self.undo_action)
-        edit_menu.addAction(self.redo_action)
-
-        # ページメニューとサムネイルの右クリックメニューは同じ QAction を使う。
-        # 各タブのサムネイル一覧に足すので、ここでは並び（区切りを含む）を作っておく
-        self.page_menu = bar.addMenu(messages.MENU_PAGE)
-        self.cut_action = self._action(messages.ACTION_CUT_PAGES, "Ctrl+X", self.cut_selected_pages)
-        self.copy_action = self._action(
-            messages.ACTION_COPY_PAGES, "Ctrl+C", self.copy_selected_pages)
-        self.paste_action = self._action(messages.ACTION_PASTE_PAGES, "Ctrl+V", self.paste_pages)
-        self.delete_pages_action = self._action(
-            messages.ACTION_DELETE_PAGES, "Delete", self.delete_selected_pages)
-        self.insert_blank_action = self._action(
-            messages.ACTION_INSERT_BLANK, None, self.insert_blank_page)
-        self.insert_pdf_action = self._action(
-            messages.ACTION_INSERT_PDF, None, self.insert_pdf_pages)
-        self.rotate_right_action = self._action(
-            messages.ACTION_ROTATE_RIGHT, "Ctrl+R", lambda: self.rotate_selected(90))
-        self.rotate_left_action = self._action(
-            messages.ACTION_ROTATE_LEFT, "Ctrl+Shift+R", lambda: self.rotate_selected(-90))
-        # これらのキーはページ一覧にフォーカスがある時だけ効かせる（ダイアログや、後の段階の
-        # 文字の編集でのコピー・貼り付けを横取りしない）。メニューにはキーを表示する
-        for action in (self.cut_action, self.copy_action, self.paste_action,
-                       self.delete_pages_action):
-            action.setShortcutContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
-        groups = [[self.cut_action, self.copy_action, self.paste_action],
-                  [self.delete_pages_action],
-                  [self.insert_blank_action, self.insert_pdf_action],
-                  [self.rotate_right_action, self.rotate_left_action]]
-        self._thumbnail_actions: list[QAction] = []
-        for n, group in enumerate(groups):
-            if n:
-                self.page_menu.addSeparator()
-                separator = QAction(self)
-                separator.setSeparator(True)
-                self._thumbnail_actions.append(separator)
-            self.page_menu.addActions(group)
-            self._thumbnail_actions += group
-
-        self.view_menu = bar.addMenu(messages.MENU_VIEW)
-        # JIS 配列では「+」に Shift が要るので、Ctrl+; と Ctrl+= でも拡大する（表示は Ctrl++）
-        self.zoom_in_action = self._action(messages.ACTION_ZOOM_IN, "Ctrl++",
-                                           lambda: self._view("zoom_in"), self.view_menu)
-        self.zoom_in_action.setShortcuts(
-            [QKeySequence("Ctrl++"), QKeySequence("Ctrl+;"), QKeySequence("Ctrl+=")])
-        self.zoom_out_action = self._action(messages.ACTION_ZOOM_OUT, "Ctrl+-",
-                                            lambda: self._view("zoom_out"), self.view_menu)
-        self.fit_width_action = self._action(messages.ACTION_FIT_WIDTH, "Ctrl+1",
-                                             lambda: self._view("fit_width"), self.view_menu)
-        self.fit_page_action = self._action(messages.ACTION_FIT_PAGE, "Ctrl+0",
-                                            lambda: self._view("fit_page"), self.view_menu)
-
     def _view_actions(self) -> list[QAction]:
         return [self.zoom_in_action, self.zoom_out_action,
                 self.fit_width_action, self.fit_page_action]
@@ -225,6 +132,8 @@ class MainWindow(QMainWindow):
         tab.saving_changed.connect(self._on_saving_changed)
         tab.selection_changed.connect(self._update_page_actions)
         tab.document_changed.connect(self._update_page_actions)
+        tab.is_open_in_other_tab = (
+            lambda path, _tab=tab: self._tab_showing(path, exclude=_tab) is not None)
         tab.thumbnails.addActions(self._thumbnail_actions)
         self.undo_group.addStack(tab.undo_stack)
         self.tab_widget.setCurrentIndex(self.tab_widget.addTab(tab, tab.title()))
@@ -328,10 +237,11 @@ class MainWindow(QMainWindow):
                 self.open_path(path)
 
     @classmethod
-    def _tab_showing(cls, path: Path) -> "tuple[MainWindow, DocumentTab] | None":
+    def _tab_showing(cls, path: Path, exclude: DocumentTab | None = None
+                     ) -> "tuple[MainWindow, DocumentTab] | None":
         for window in cls.instances:
             for tab in window.tabs():
-                if tab.doc.path is not None and _same_file(tab.doc.path, path):
+                if tab is not exclude and tab.doc.path is not None and same_file(tab.doc.path, path):
                     return window, tab
         return None
 

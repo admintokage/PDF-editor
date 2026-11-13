@@ -249,6 +249,7 @@ def _run_app(argv: list[str]) -> int:
 
     window = MainWindow()
     window.show()
-    for arg in argv[1:]:  # 実行ファイルに複数のファイルをドロップすると、それぞれタブで開く
-        window.open_path(Path(arg))
+    # 実行ファイルに複数のファイルをドロップすると、それぞれタブで開く。ウィンドウへの
+    # ドロップと同じく、PDF 以外は無視する（--オプションはファイルではない）
+    window.handle_dropped_paths([Path(a) for a in argv[1:] if not a.startswith("--")])
     return app.exec()

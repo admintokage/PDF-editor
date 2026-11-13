@@ -7,7 +7,7 @@ from PySide6.QtCore import QTimer
 from PySide6.QtWidgets import QProgressDialog
 
 from pdfeditor.core.document import PdfDocument
-from pdfeditor.ui import document_tab
+from pdfeditor.ui import document_tab, messages
 from pdfeditor.ui.main_window import MainWindow
 from pdfeditor.ui.page_commands import MovePagesCommand, push_command
 from tests.helpers import lock_file, open_window, select
@@ -218,3 +218,77 @@ def test_drop_and_open_refused_while_saving(qtbot, simple_pdf, tmp_path, monkeyp
     QTimer.singleShot(50, during)
     assert w.save() is True
     assert seen == {"open": False} and len(MainWindow.instances) == count
+
+
+# --- 別のタブで開いているファイルへの「名前を付けて保存」は断る ---------------------
+
+def _dialog_answers(monkeypatch, *names):
+    """getSaveFileName が順に返す名前。呼ばれた回数は返すリストの長さで分かる。"""
+    asked = []
+    answers = iter(names)
+    monkeypatch.setattr("PySide6.QtWidgets.QFileDialog.getSaveFileName",
+                        lambda *a, **k: (asked.append(1), (str(next(answers)), ""))[1])
+    return asked
+
+
+def test_save_as_onto_file_open_in_other_tab_is_refused(qtbot, simple_pdf, mixed_size_pdf,
+                                                        tmp_path, monkeypatch):
+    free = tmp_path / "free.pdf"
+    asked = _dialog_answers(monkeypatch, mixed_size_pdf, free)
+    shown = []
+    monkeypatch.setattr("pdfeditor.ui.dialogs.show_error", lambda p, e: shown.append(e.user_message))
+    before = mixed_size_pdf.read_bytes()
+    w = open_window(qtbot, simple_pdf, mixed_size_pdf)
+    tab_a, tab_b = w.tabs()
+    assert tab_a.save_as() is True
+    assert shown == [messages.SAVE_TARGET_OPEN_ELSEWHERE] and len(asked) == 2
+    assert mixed_size_pdf.read_bytes() == before and tab_b.doc.path == mixed_size_pdf
+    assert tab_a.doc.path == free and free.exists()
+
+
+def test_save_as_refused_target_then_cancel_saves_nothing(qtbot, simple_pdf, mixed_size_pdf,
+                                                          monkeypatch):
+    names = iter([str(mixed_size_pdf), ""])
+    monkeypatch.setattr("PySide6.QtWidgets.QFileDialog.getSaveFileName",
+                        lambda *a, **k: (next(names), ""))
+    shown = []
+    monkeypatch.setattr("pdfeditor.ui.dialogs.show_error", lambda p, e: shown.append(e))
+    before = mixed_size_pdf.read_bytes()
+    w = open_window(qtbot, simple_pdf, mixed_size_pdf)
+    assert w.tabs()[0].save_as() is False and len(shown) == 1
+    assert mixed_size_pdf.read_bytes() == before and w.tabs()[0].doc.path == simple_pdf
+
+
+def test_save_as_onto_own_path_is_allowed(qtbot, simple_pdf, mixed_size_pdf, monkeypatch):
+    _dialog_answers(monkeypatch, simple_pdf)
+    monkeypatch.setattr("pdfeditor.ui.dialogs.show_error", lambda p, e: pytest.fail("refused"))
+    w = open_window(qtbot, simple_pdf, mixed_size_pdf)
+    assert w.tabs()[0].save_as() is True and w.tabs()[0].doc.path == simple_pdf
+
+
+def test_save_as_refused_when_other_window_has_the_file(qtbot, simple_pdf, mixed_size_pdf,
+                                                        tmp_path, monkeypatch):
+    free = tmp_path / "free2.pdf"
+    asked = _dialog_answers(monkeypatch, mixed_size_pdf, free)
+    shown = []
+    monkeypatch.setattr("pdfeditor.ui.dialogs.show_error", lambda p, e: shown.append(e.user_message))
+    w1 = open_window(qtbot, simple_pdf)
+    open_window(qtbot, mixed_size_pdf)
+    assert w1.save_as() is True
+    assert shown == [messages.SAVE_TARGET_OPEN_ELSEWHERE] and len(asked) == 2
+
+
+def test_save_error_fallback_save_as_also_refuses_open_file(qtbot, simple_pdf, mixed_size_pdf,
+                                                            tmp_path, monkeypatch):
+    free = tmp_path / "escape.pdf"
+    asked = _dialog_answers(monkeypatch, mixed_size_pdf, free)
+    monkeypatch.setattr("pdfeditor.ui.dialogs.show_save_error", lambda p, e: "save_as")
+    shown = []
+    monkeypatch.setattr("pdfeditor.ui.dialogs.show_error", lambda p, e: shown.append(e.user_message))
+    before = mixed_size_pdf.read_bytes()
+    w = open_window(qtbot, simple_pdf, mixed_size_pdf)
+    tab_a = w.tabs()[0]
+    with lock_file(simple_pdf):
+        assert tab_a.save() is True
+    assert shown == [messages.SAVE_TARGET_OPEN_ELSEWHERE] and len(asked) == 2
+    assert mixed_size_pdf.read_bytes() == before and free.exists()

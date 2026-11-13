@@ -108,3 +108,25 @@ def test_app_dialogs_use_japanese_button_texts(qapp):
     pw = dialogs.password_dialog(None, "x")
     assert pw.okButtonText() == messages.BUTTON_OK and pw.cancelButtonText() == messages.BUTTON_CANCEL
     box.deleteLater(); pw.deleteLater()
+
+
+def test_main_ignores_non_pdf_and_option_arguments_like_drops(simple_pdf, tmp_path, monkeypatch,
+                                                              _isolated):
+    txt = tmp_path / "memo.txt"; txt.write_text("x")
+    monkeypatch.setattr("pdfeditor.ui.dialogs.show_error", lambda p, e: pytest.fail("error shown"))
+    assert app.main(["PDF-editor", str(txt), "--some-option", str(simple_pdf)]) == 0
+    window = MainWindow.instances[0]
+    assert [t.doc.path for t in window.tabs()] == [simple_pdf]
+
+
+def test_main_with_only_a_non_pdf_opens_an_empty_window(tmp_path, monkeypatch, _isolated):
+    txt = tmp_path / "memo.txt"; txt.write_text("x")
+    monkeypatch.setattr("pdfeditor.ui.dialogs.show_error", lambda p, e: pytest.fail("error shown"))
+    assert app.main(["PDF-editor", str(txt)]) == 0
+    assert len(MainWindow.instances) == 1 and MainWindow.instances[0].tabs() == []
+
+
+def test_main_treats_pdf_suffix_case_insensitively(simple_pdf, tmp_path, _isolated):
+    upper = tmp_path / "UPPER.PDF"; upper.write_bytes(simple_pdf.read_bytes())
+    assert app.main(["PDF-editor", str(upper)]) == 0
+    assert [t.doc.path for t in MainWindow.instances[0].tabs()] == [upper]

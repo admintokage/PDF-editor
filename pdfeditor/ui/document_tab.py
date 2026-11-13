@@ -36,6 +36,13 @@ log = logging.getLogger(__name__)
 PROGRESS_DELAY_MS = 1000  # 保存がこれより長引いたら進行表示を出す
 
 
+def same_file(a: Path, b: Path) -> bool:
+    try:
+        return a.resolve() == b.resolve()
+    except OSError:
+        return a == b
+
+
 class _SaveSignals(QObject):
     done = Signal(object)  # None（成功）か SaveFailedError
 
@@ -71,6 +78,8 @@ class DocumentTab(QWidget):
         super().__init__(parent)
         self.doc = doc
         self.password_retry = False  # dialogs.ask_password が「違う」の注記に使う
+        # 別のタブ（どのウィンドウでも）が path を開いているか。MainWindow が差し込む
+        self.is_open_in_other_tab = lambda path: False
         self._saving = False
         self._blocked = False
         self._shut_down = False
@@ -298,16 +307,21 @@ class DocumentTab(QWidget):
         return target is not None and self._save_to(target)
 
     def _ask_save_path(self) -> Path | None:
+        """保存先を尋ねる。別のタブで開いているファイルは断って尋ね直す（上書きで、そのタブの
+        編集を失わせない）。自分の今のファイルへの上書きは許す。キャンセルは None。"""
         path = self.doc.path
-        name, _ = QFileDialog.getSaveFileName(
-            self, messages.SAVE_DIALOG_TITLE, str(path) if path else "",
-            messages.OPEN_DIALOG_FILTER)
-        if not name:
-            return None
-        target = Path(name)
-        if target.suffix.lower() != ".pdf":
-            target = target.with_name(target.name + ".pdf")
-        return target
+        while True:
+            name, _ = QFileDialog.getSaveFileName(
+                self, messages.SAVE_DIALOG_TITLE, str(path) if path else "",
+                messages.OPEN_DIALOG_FILTER)
+            if not name:
+                return None
+            target = Path(name)
+            if target.suffix.lower() != ".pdf":
+                target = target.with_name(target.name + ".pdf")
+            if not self.is_open_in_other_tab(target):
+                return target
+            dialogs.show_error(self, PageOperationError(messages.SAVE_TARGET_OPEN_ELSEWHERE))
 
     def _save_to(self, target: Path | None) -> bool:
         """成功するか、利用者がやめるまで続ける。成功した時だけ True。"""
