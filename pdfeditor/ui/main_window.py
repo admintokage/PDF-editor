@@ -113,7 +113,8 @@ class MainWindow(QMainWindow):
         self.document_changed.connect(self._on_document_changed)
         self.thumbnails.page_activated.connect(self.page_view.scroll_to_page)
         self.page_view.current_page_changed.connect(self.thumbnails.show_page)
-        self.undo_stack.cleanChanged.connect(lambda clean: self.setWindowModified(not clean))
+        self.undo_stack.cleanChanged.connect(self._on_clean_changed)
+        self._closed = False
 
         self._build_menus()
         self.thumbnails.selectionModel().selectionChanged.connect(self._update_page_actions)
@@ -560,6 +561,9 @@ class MainWindow(QMainWindow):
             self.handle_dropped_paths(paths)
 
     # --- 終了 -------------------------------------------------------------
+    def _on_clean_changed(self, clean: bool) -> None:
+        self.setWindowModified(not clean)
+
     def closeEvent(self, event) -> None:
         if self._saving:  # 保存の最中は閉じない
             event.ignore()
@@ -572,6 +576,13 @@ class MainWindow(QMainWindow):
                 return
         if self in MainWindow.instances:
             MainWindow.instances.remove(self)
+        # 履歴は、ウィンドウが破棄される時に片付けられて「未保存の印」の通知を出す。
+        # 破棄済みのウィンドウに届くと例外になるので、閉じると決まったここで切り離す。
+        if not self._closed:
+            self._closed = True
+            self.undo_stack.cleanChanged.disconnect(self._on_clean_changed)
+            self.setWindowModified(False)
+        self.undo_stack.clear()
         self.page_view.set_document(None, None)
         self.thumbnails.set_document(None, None, None)
         if self.render_service is not None:  # 描画スレッドを止めてから文書を閉じる
