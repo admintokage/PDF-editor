@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pymupdf
 
-from pdfeditor.core import errors
+from pdfeditor.core import errors, safe_save
 
 _PERM_OWNER_BIT = 4  # authenticate() の戻り値で、権限パスワード一致を示すビット
 
@@ -24,6 +24,7 @@ class PdfDocument:
         self.fitz = fitz_doc
         self.path = path
         self.lock = threading.RLock()
+        self.backup_done = False  # この文書で上書き用バックアップを作ったか
 
     @classmethod
     def open(cls, path: Path, password: str | None = None) -> "PdfDocument":
@@ -98,6 +99,26 @@ class PdfDocument:
         with self.lock:
             pix = self._page(index).get_pixmap(matrix=pymupdf.Matrix(zoom, zoom), alpha=False)
             return RenderedPage(pix.width, pix.height, pix.stride, bytes(pix.samples))
+
+    def to_bytes(self) -> bytes:
+        with self.lock:
+            return self.fitz.tobytes(garbage=3, deflate=True)
+
+    def save(self, target: Path | None = None) -> None:
+        """target が None または現在のパスと同じなら上書き（初回のみバックアップ）。
+        失敗時は SaveFailedError で、元のファイルには触れない。成功後は self.path が保存先になる。"""
+        data = self.to_bytes()
+        pages = self.page_count
+        dest = Path(target) if target is not None else self.path
+        if dest is None:
+            raise errors.SaveFailedError("保存先が指定されていません。", "other")
+        overwrite = self.path is not None and dest == self.path
+        made = safe_save.write_atomically(
+            data, dest, backup=overwrite and not self.backup_done, expected_pages=pages
+        )
+        if made:
+            self.backup_done = True
+        self.path = dest
 
     def close(self) -> None:
         with self.lock:
