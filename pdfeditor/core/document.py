@@ -127,6 +127,9 @@ class PdfDocument:
         self._tree_flat = False  # ページツリーの受け継ぎ属性をページに書き写したか
         # このセッションで外していて、まだ戻していないページ。保存の写しでこれだけを掃除する
         self._detached: list[DetachedPages] = []
+        # 共有の Resources から削除ページの資源を外した結果の控え（次の保存で、変わっていない
+        # ページの読み直しと描き比べを省く）
+        self._prune_memo = resource_prune.Memo()
 
     def _ensure_flat_tree(self) -> None:
         """ページの構成を変える前に一度だけ、受け継ぎ属性を各ページに書き写す（lock を保持して呼ぶ）。
@@ -439,7 +442,7 @@ class PdfDocument:
                 copy.authenticate(self._password or "")
             try:
                 scrub.scrub_detached_pages(copy, snapshot.detached_pages,
-                                           snapshot.untargeted_outline)
+                                           snapshot.untargeted_outline, self._prune_memo)
             except Exception as exc:  # noqa: BLE001 - 取り除けたと言えなければ保存しない
                 log.exception("scrubbing deleted pages failed; save refused")
                 raise errors.SaveFailedError(_SCRUB_FAILED, "verify_failed") from exc

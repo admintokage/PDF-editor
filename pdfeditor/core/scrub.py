@@ -94,8 +94,10 @@ def _direct_refs(obj, skip_key: str | None = None, top: bool = True) -> list[int
 
 
 class _Scrub:
-    def __init__(self, doc: pymupdf.Document, pages: set[int], untargeted_outline: set[int]):
+    def __init__(self, doc: pymupdf.Document, pages: set[int], untargeted_outline: set[int],
+                 memo: resource_prune.Memo | None = None):
         self.doc = doc
+        self.memo = memo
         self.pdf = pymupdf._as_pdf_document(doc)
         self.size = doc.xref_length()
         self.pages = pages
@@ -180,8 +182,9 @@ class _Scrub:
     def prune_shared_resources(self) -> None:
         """残るページと共有している Resources から、残るページが使っていない、削除ページの
         資源の項目を取り除く（resource_prune。見た目が変わらないことを確かめる）。"""
-        resource_prune.prune_unused_resources(self.doc, self.resource_candidates(), self.pages,
-                                              self.text_refs)
+        resource_prune.prune_unused_resources(self.doc, self.resource_candidates(),
+                                              self.pages | self.removed_annots, self.text_refs,
+                                              self.memo)
 
     # ---- 行き先 ----
 
@@ -771,14 +774,16 @@ def _fix_trees(s: _Scrub) -> None:
 
 
 def scrub_detached_pages(doc: pymupdf.Document, pages: Iterable[int],
-                         untargeted_outline: Iterable[int] = ()) -> int:
+                         untargeted_outline: Iterable[int] = (),
+                         memo: resource_prune.Memo | None = None) -> int:
     """写し doc から、外したページ pages（xref）にだけ属するものを取り除く。取り除いたページ数を
     返す。untargeted_outline は、削除のときに行き先を外したしおりの項目（xref）。
-    取り除ききれなければ UnscrubbableError。"""
+    取り除ききれなければ UnscrubbableError。memo は、生きている文書ごとの資源の取り除きの控え
+    （resource_prune.Memo。前の保存の結果を使い回す）。"""
     pages = set(pages)
     if not pages:
         return 0
-    s = _Scrub(doc, pages, set(untargeted_outline))
+    s = _Scrub(doc, pages, set(untargeted_outline), memo)
     s.check_pages()
     if not s.pages:
         return 0

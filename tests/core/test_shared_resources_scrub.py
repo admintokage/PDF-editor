@@ -183,3 +183,92 @@ def test_wrong_pruning_is_detected_and_undone(tmp_path, monkeypatch, caplog, lay
     assert any("changed how" in r.getMessage() for r in caplog.records)
     assert _warnings_after_full_load(out) == ""
 
+
+
+# ---------------------------------------------------------------------------
+# 安全網が見分けること: 取りこぼした名前の、見た目のごく小さな違いでも戻す
+
+SUBTLE = {
+    "tiny_image": ("XObject", "q 0.05 0 0 0.05 100 100 cm /SUB Do Q", "{img}"),
+    "small_text": ("Font", "BT /SUB 0.5 Tf 100 100 Td (tiny) Tj ET",
+                   "<</Type/Font/Subtype/Type1/BaseFont/Courier/Encoding/WinAnsiEncoding>>"),
+    "alpha_099": ("ExtGState", "q /SUB gs 1 0 0 rg 0 0 100 100 re f Q", "<</Type/ExtGState/ca 0.99>>"),
+    "calrgb": ("ColorSpace", "q /SUB cs 0.2 0.5 0.7 sc 0 0 100 100 re f Q",
+               "[/CalRGB<</WhitePoint[0.9505 1 1.089]/Gamma[2.2 2.2 2.2]>>]"),
+    "print_only_layer": ("Properties", "/OC /SUB BDC 0 0 1 rg 0 0 100 100 re f EMC", "{ocg}"),
+}
+
+
+@pytest.mark.parametrize("kind", SUBTLE)
+def test_safety_net_sees_subtle_changes(tmp_path, monkeypatch, caplog, kind):
+    cat, content, value = SUBTLE[kind]
+    doc = pymupdf.open()
+    for _ in range(3):
+        doc.new_page(width=200, height=200)
+    pix = pymupdf.Pixmap(pymupdf.csRGB, pymupdf.IRect(0, 0, 4, 4), False)
+    pix.set_rect(pix.irect, (250, 0, 0))
+    doc[0].insert_image(pymupdf.Rect(0, 0, 1, 1), pixmap=pix)
+    img = doc[0].get_images()[0][0]
+
+    def obj(text):
+        x = doc.get_new_xref()
+        doc.update_object(x, text)
+        return x
+    ocg = obj("<</Type/OCG/Name(print)/Usage<</Print<</PrintState/ON>>/View<</ViewState/OFF>>>>>>")
+    doc.xref_set_key(doc.pdf_catalog(), "OCProperties",
+                     f"<</OCGs[{ocg} 0 R]/D<</OFF[{ocg} 0 R]/AS[<</Event/Print/Category[/Print]"
+                     f"/OCGs[{ocg} 0 R]>>]>>>>")
+    sub = {"{img}": img, "{ocg}": ocg}.get(value) or obj(value)
+    dele = obj(f"<</Type/XObject/Subtype/Image/Width 1/Height 1/ColorSpace/DeviceRGB"
+               f"/BitsPerComponent 8/Length 3>>")
+    doc.update_stream(dele, b"\x01\x02\x03")
+    rx = obj(f"<</{cat}<</SUB {sub} 0 R>>/XObject<</SUB {sub} 0 R/ImD {dele} 0 R>>>>"
+             if cat == "XObject" else f"<</{cat}<</SUB {sub} 0 R>>/XObject<</ImD {dele} 0 R>>>>")
+    for i, c in enumerate(["q 50 0 0 50 0 0 cm /ImD Do Q", content, ""]):
+        cx = obj("<<>>")
+        doc.update_stream(cx, c.encode())
+        doc.xref_set_key(doc[i].xref, "Contents", f"{cx} 0 R")
+        doc.xref_set_key(doc[i].xref, "Resources", f"{rx} 0 R")
+    doc.save(tmp_path / "src.pdf", garbage=3)
+    doc.close()
+    looks = page_looks(tmp_path / "src.pdf", zoom=200 / 72)
+    real = resource_prune.names_in
+    monkeypatch.setattr(resource_prune, "names_in",
+                        lambda pdf, s: [(c, n) for c, n in real(pdf, s) if n != "SUB"])
+    d = PdfDocument.open(tmp_path / "src.pdf")
+    d.delete_pages([0])
+    with caplog.at_level(logging.WARNING):
+        d.save(tmp_path / "out.pdf")
+    d.close()
+    assert page_looks(tmp_path / "out.pdf", zoom=200 / 72) == looks[1:]
+    assert any("changed how" in r.getMessage() for r in caplog.records)
+
+
+# ---------------------------------------------------------------------------
+# 保存を繰り返すとき: 変わっていないページは読み直さず、描き比べもしない
+
+def test_repeated_saves_reuse_verified_pages(tmp_path, monkeypatch):
+    src = make_shared_resources_pdf(tmp_path / "src.pdf", "shared")
+    looks = page_looks(src)
+    calls = []
+    real = resource_prune._fingerprint
+    monkeypatch.setattr(resource_prune, "_fingerprint", lambda doc, i: calls.append(i) or real(doc, i))
+    d = PdfDocument.open(src)
+    d.delete_pages([2])
+    d.save(tmp_path / "a.pdf")
+    assert len(calls) == 2 * 4  # 残る 4 ページを、取り除く前と後で
+    calls.clear()
+    d.rotate_by([1], 90)
+    d.save(tmp_path / "b.pdf")
+    assert sorted(calls) == [1, 1]  # 回したページだけ
+    calls.clear()
+    d.save(tmp_path / "c.pdf")
+    assert calls == []
+    d.delete_pages([0])  # 外すページが増えた: 取り除くものが変わるので確かめ直す
+    d.save(tmp_path / "d.pdf")
+    assert len(calls) == 2 * 3
+    d.close()
+    _assert_page3_gone(tmp_path / "d.pdf")
+    b = page_looks(tmp_path / "b.pdf")  # 2 ページ目は回してある
+    assert b[0] == looks[0] and b[2:] == [looks[3], looks[4]]
+    assert page_looks(tmp_path / "d.pdf") == [b[1], looks[3], looks[4]]
