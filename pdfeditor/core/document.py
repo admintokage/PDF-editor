@@ -170,6 +170,47 @@ class PdfDocument:
             self.fitz.delete_pages(indices)
             return data
 
+    def capture_links(self, indices: list[int]) -> dict[int, list[dict]]:
+        """削除の取り消し用に、削除で変わりうるページ（削除するページと、削除するページへ
+        リンクしているページ）のリンクを、ページ番号つきで控える。削除の前に呼ぶ。"""
+        with self.lock:
+            self._check_indices(indices)
+            doomed = set(indices)
+            out: dict[int, list[dict]] = {}
+            for i in range(self.fitz.page_count):
+                links = self._page(i).get_links()
+                if i in doomed or any(
+                    link.get("kind") == pymupdf.LINK_GOTO and link.get("page") in doomed
+                    for link in links
+                ):
+                    out[i] = [dict(link) for link in links]
+            return out
+
+    def restore_deleted_pages(
+        self, data: bytes, indices: list[int], links: dict[int, list[dict]],
+        toc: list | None = None,
+    ) -> None:
+        """delete_pages が返した data のページを元の位置 indices に戻し、
+        capture_links で控えたリンクとしおり toc を元通りにする。"""
+        with self.lock:
+            src = pymupdf.open(stream=data, filetype="pdf")
+            try:
+                # 元の位置の小さい順に 1 ページずつ戻せば、非連続の選択でも元の並びになる
+                for k, index in enumerate(sorted(indices)):
+                    self.fitz.insert_pdf(src, from_page=k, to_page=k, start_at=index)
+            finally:
+                src.close()
+            # 戻した後のページ番号は削除前と同じなので、控えたリンクをそのまま付け直せる
+            for index, saved in links.items():
+                page = self._page(index)
+                for existing in page.get_links():
+                    page.delete_link(existing)
+                for link in saved:
+                    link = {k: v for k, v in link.items() if k not in ("xref", "id")}
+                    page.insert_link(link)
+            if toc is not None:
+                self.fitz.set_toc(toc)
+
     def insert_blank(self, at: int, width: float, height: float) -> None:
         with self.lock:
             self._check_position(at)

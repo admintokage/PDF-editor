@@ -1,3 +1,4 @@
+import pymupdf
 import pytest
 
 from pdfeditor.core import errors
@@ -92,9 +93,40 @@ def test_clean_state_tracks_save(qtbot, simple_pdf):
     assert not s.isClean(); s.setClean(); assert s.isClean(); s.undo(); assert not s.isClean()
 
 
-def test_links_into_deleted_pages_are_lost_on_undo_known_limitation(qtbot, toc_links_pdf):
-    """既知の制限: 削除したページを指していたリンクは pymupdf が削除時に落とすので戻らない。"""
+def _links(d):
+    """各ページのリンクを (種類, 矩形, 行き先ページ) の並びで返す。"""
+    out = []
+    for i in range(d.page_count):
+        out.append(sorted(
+            (l["kind"], tuple(round(v, 2) for v in l["from"]), l.get("page", -1))
+            for l in d.fitz[i].get_links()
+        ))
+    return out
+
+
+# toc_links_pdf: ページ 2（index 1）にページ 4（index 3）へのリンクが 1 つ
+@pytest.mark.parametrize("indices", [[3], [1], [1, 3], [0, 3], [3, 1, 4]])
+def test_delete_undo_redo_undo_preserves_links(qtbot, toc_links_pdf, indices):
     d = PdfDocument.open(toc_links_pdf); stack = make_undo_stack(None)
-    assert len(d.fitz[1].get_links()) == 1
-    stack.push(DeletePagesCommand(d, [3])); stack.undo()
-    assert d.fitz[1].get_links() == []
+    before_links, before = _links(d), snapshot(d)
+    assert before_links[1] == [(pymupdf.LINK_GOTO, (72, 150, 200, 180), 3)]
+    stack.push(DeletePagesCommand(d, indices)); deleted = snapshot(d)
+    stack.undo(); assert _links(d) == before_links and snapshot(d) == before
+    stack.redo(); assert snapshot(d) == deleted
+    stack.undo(); assert _links(d) == before_links and snapshot(d) == before
+
+
+@pytest.mark.parametrize("indices", [[3], [0], [3, 0], [4, 2]])
+def test_delete_undo_preserves_links_from_deleted_pages_and_uri(qtbot, toc_links_pdf, indices):
+    d = PdfDocument.open(toc_links_pdf)
+    d.fitz[3].insert_link({"kind": pymupdf.LINK_GOTO, "from": pymupdf.Rect(10, 10, 60, 40),
+                           "page": 0, "to": pymupdf.Point(0, 0)})   # 削除ページ -> 残るページ
+    d.fitz[4].insert_link({"kind": pymupdf.LINK_URI, "from": pymupdf.Rect(10, 50, 90, 70),
+                           "uri": "https://example.com/"})
+    d.fitz[0].insert_link({"kind": pymupdf.LINK_GOTO, "from": pymupdf.Rect(10, 80, 90, 100),
+                           "page": 2, "to": pymupdf.Point(0, 0)})
+    stack = make_undo_stack(None); before = _links(d)
+    stack.push(DeletePagesCommand(d, indices)); stack.undo()
+    assert _links(d) == before
+    stack.redo(); stack.undo(); assert _links(d) == before
+    assert [l.get("uri") for l in d.fitz[4].get_links()] == ["https://example.com/"]

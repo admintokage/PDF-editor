@@ -1,7 +1,6 @@
 """ページ操作を「元に戻す」に対応させる QUndoCommand 群。"""
 from collections.abc import Callable
 
-import pymupdf
 from PySide6.QtGui import QUndoCommand, QUndoStack
 
 from pdfeditor.core.document import PdfDocument, page_order_after_move
@@ -69,25 +68,19 @@ class DeletePagesCommand(_PageCommand):
         self._indices = sorted(indices)
         self._removed = b""
         self._toc: list = []
+        self._links: dict[int, list[dict]] = {}
 
     def _apply(self) -> None:
         with self._doc.lock:
             toc = self._doc.fitz.get_toc(simple=False)
-            self._removed = self._doc.delete_pages(self._indices)  # 不正ならここで例外
-            self._toc = toc
+            links = self._doc.capture_links(self._indices)  # 不正ならここで例外
+            self._removed = self._doc.delete_pages(self._indices)
+            self._toc, self._links = toc, links
 
     def _revert(self) -> None:
         if not self._removed:
             return
-        with self._doc.lock:
-            src = pymupdf.open(stream=self._removed, filetype="pdf")
-            try:
-                # 元の位置の小さい順に 1 ページずつ戻せば、非連続の選択でも元の並びになる
-                for k, index in enumerate(self._indices):
-                    self._doc.fitz.insert_pdf(src, from_page=k, to_page=k, start_at=index)
-            finally:
-                src.close()
-            self._doc.fitz.set_toc(self._toc)
+        self._doc.restore_deleted_pages(self._removed, self._indices, self._links, self._toc)
 
 
 class InsertBlankCommand(_PageCommand):
