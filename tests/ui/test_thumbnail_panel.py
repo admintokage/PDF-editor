@@ -323,9 +323,10 @@ def test_drag_drop_is_configured(qtbot, big_pdf):
 
 
 # --- メニュー・ショートカット ---------------------------------------------------
-def test_page_actions_shared_and_shortcuts(qtbot):
+def test_page_actions_shared_and_shortcuts(qtbot, simple_pdf):
     from pdfeditor.ui.main_window import MainWindow
-    w = MainWindow(); qtbot.addWidget(w)
+    empty = MainWindow(); qtbot.addWidget(empty)
+    w = open_window(qtbot, simple_pdf)  # サムネイル一覧はタブの中にあるので、文書を開いて調べる
     actions = [w.delete_pages_action, w.insert_blank_action, w.insert_pdf_action,
                w.rotate_right_action, w.rotate_left_action]
     assert [a for a in w.page_menu.actions() if not a.isSeparator()] == actions
@@ -333,7 +334,9 @@ def test_page_actions_shared_and_shortcuts(qtbot):
     assert w.thumbnails.contextMenuPolicy() == Qt.ContextMenuPolicy.ActionsContextMenu
     assert [a.shortcut().toString() for a in actions] == [
         "Del", "", "", "Ctrl+R", "Ctrl+Shift+R"]
-    assert not any(a.isEnabled() for a in actions)
+    empty_actions = [empty.delete_pages_action, empty.insert_blank_action,
+                     empty.insert_pdf_action, empty.rotate_right_action, empty.rotate_left_action]
+    assert not any(a.isEnabled() for a in empty_actions)
 
 
 def test_page_actions_enabled_by_document_and_selection(qtbot, simple_pdf):
@@ -361,14 +364,16 @@ def test_delete_key_in_page_view_does_nothing(qtbot, big_pdf):
     assert labels(w.doc) == [1, 2, 3, 4]
 
 
-def test_thumbnail_dock(qtbot):
-    from PySide6.QtWidgets import QDockWidget
-    from pdfeditor.ui.main_window import MainWindow
-    w = MainWindow(); qtbot.addWidget(w)
-    docks = w.findChildren(QDockWidget)
-    assert len(docks) == 1 and docks[0].windowTitle() == "ページ"
-    assert docks[0].widget() is w.thumbnails
-    assert w.dockWidgetArea(docks[0]) == Qt.DockWidgetArea.LeftDockWidgetArea
+def test_thumbnails_left_of_page_view_in_each_tab(qtbot, simple_pdf):
+    """左のドックはなくし、サムネイルはタブの中の QSplitter の左に置く（幅は以前のドックと同じ）。"""
+    from PySide6.QtWidgets import QDockWidget, QSplitter
+    w = open_window(qtbot, simple_pdf)
+    assert w.findChildren(QDockWidget) == []
+    splitter = w.thumbnails.parent()
+    assert isinstance(splitter, QSplitter) and splitter.orientation() == Qt.Orientation.Horizontal
+    assert splitter.widget(0) is w.thumbnails and splitter.widget(1) is w.page_view
+    assert w.current_tab().isAncestorOf(splitter)
+    assert abs(w.thumbnails.width() - w.thumbnails.panel_width()) <= 2
 
 
 # --- 空白ページのダイアログ -----------------------------------------------------

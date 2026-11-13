@@ -204,13 +204,14 @@ def test_open_shows_pages_and_close_shuts_service_first(qtbot, simple_pdf, qtlog
     assert w.page_view.doc is w.doc and w.page_view.service is w.render_service
     assert w.page_view.visible_pages()
     order = []
-    service, doc = w.render_service, w.doc
+    service, doc, view = w.render_service, w.doc, w.page_view
     orig_shutdown, orig_close = service.shutdown, doc.close
     service.shutdown = lambda: (order.append("shutdown"), orig_shutdown())
     doc.close = lambda: (order.append("close"), orig_close())
     w.close()
     assert order == ["shutdown", "close"]
-    assert w.render_service is None and w.page_view.doc is None
+    # ページ表示はタブの部品になった。閉じたタブのページ表示は文書を手放している
+    assert w.render_service is None and w.page_view is None and view.doc is None
     # offscreen プラグイン自身が出す propagateSizeHints の注意以外は出ていない
     assert not [r for r in qtlog.records
                 if r.type != QtMsgType.QtDebugMsg and "propagateSizeHints" not in r.message]

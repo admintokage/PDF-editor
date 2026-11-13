@@ -171,8 +171,7 @@ def _run_startup_benchmark(argv: list[str], result_file: Path | None, entered: f
     window.installEventFilter(watcher)
     window.show()
     app.exec()
-    window.undo_stack.setClean()
-    window.close()
+    window.close()  # 文書を開いていないので、保存を尋ねない
     if not out:
         diagnostics.write_result(result_file, "ERROR: ウィンドウが描かれませんでした")
         return 1

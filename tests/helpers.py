@@ -50,19 +50,22 @@ def make_view(qtbot, pdf_path: Path, size=(800, 1000)):
     return view
 
 
-def open_window(qtbot, pdf_path: Path):
-    """MainWindow を出して（offscreen）文書を開き、表示されるまで待つ。後始末では変更を
+def open_window(qtbot, pdf_path: Path, *more: Path):
+    """MainWindow を出して（offscreen）文書を開き、表示されるまで待つ。more を渡すと、同じ
+    ウィンドウの別のタブで開く（最後に開いたものが表示中）。後始末ではすべてのタブの変更を
     保存済み扱いにしてから閉じる（閉じる時に保存を尋ねないように）。"""
     from pdfeditor.ui.main_window import MainWindow
 
     window = MainWindow()
 
     def cleanup(_window) -> None:
-        window.undo_stack.setClean()
+        for tab in window.tabs():
+            tab.undo_stack.setClean()
 
     qtbot.addWidget(window, before_close_func=cleanup)
     window.show()
-    assert window.open_path(pdf_path)
+    for path in (pdf_path, *more):
+        assert window.open_path(path)
     qtbot.waitExposed(window)
     return window
 

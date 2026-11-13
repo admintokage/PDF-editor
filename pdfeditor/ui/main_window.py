@@ -1,18 +1,11 @@
-"""メインウィンドウ。文書の開く流れ・メニュー・ドロップを受け持つ。"""
+"""メインウィンドウ。文書のタブ・メニュー・開く流れ・閉じる流れ・ドロップを受け持つ。
+1 文書ぶんの部品と操作は DocumentTab にあり、メニューは表示中のタブに働く。"""
 import logging
-import os
 from pathlib import Path
 
-from PySide6.QtCore import QEventLoop, QObject, QRunnable, Qt, QThreadPool, QTimer, Signal
-from PySide6.QtGui import QAction, QKeySequence
-from PySide6.QtWidgets import (
-    QDockWidget,
-    QFileDialog,
-    QLabel,
-    QMainWindow,
-    QProgressDialog,
-    QStackedWidget,
-)
+from PySide6.QtCore import Qt, Signal
+from PySide6.QtGui import QAction, QKeySequence, QUndoGroup
+from PySide6.QtWidgets import QFileDialog, QLabel, QMainWindow, QStackedWidget, QTabWidget
 
 from pdfeditor.core.document import PdfDocument
 from pdfeditor.core.errors import (
@@ -20,21 +13,12 @@ from pdfeditor.core.errors import (
     OwnerPasswordRequiredError,
     PasswordRequiredError,
     PdfEditorError,
-    SaveFailedError,
     WrongPasswordError,
 )
 from pdfeditor.ui import dialogs, messages
-from pdfeditor.ui.page_commands import (
-    DeletePagesCommand,
-    InsertBlankCommand,
-    InsertPdfCommand,
-    RotatePagesCommand,
-    make_undo_stack,
-    push_command,
-)
-from pdfeditor.ui.page_view import PageView
-from pdfeditor.ui.render_service import RenderService
-from pdfeditor.ui.thumbnail_panel import ThumbnailPanel
+from pdfeditor.ui.document_tab import DocumentTab
+
+log = logging.getLogger(__name__)
 
 
 def _same_file(a: Path, b: Path) -> bool:
@@ -44,186 +28,278 @@ def _same_file(a: Path, b: Path) -> bool:
         return a == b
 
 
-log = logging.getLogger(__name__)
-
-PROGRESS_DELAY_MS = 1000  # 保存がこれより長引いたら進行表示を出す
-
-
-class _SaveSignals(QObject):
-    done = Signal(object)  # None（成功）か SaveFailedError
-
-
-class _SaveTask(QRunnable):
-    """別スレッドで doc.save だけを行う。Qt のウィジェットには触れない。"""
-
-    def __init__(self, doc: PdfDocument, target: Path | None, signals: _SaveSignals):
-        super().__init__()
-        self._doc, self._target, self._signals = doc, target, signals
-
-    def run(self) -> None:
-        result: SaveFailedError | None = None
-        try:
-            self._doc.save(self._target)
-        except SaveFailedError as err:
-            result = err
-        except Exception:  # 想定外でもアプリを落とさず、編集内容は残す
-            log.exception("unexpected error while saving")
-            result = SaveFailedError(messages.SAVE_UNEXPECTED, "other")
-        self._signals.done.emit(result)
+def _current(name: str) -> property:
+    """表示中のタブの属性（タブがなければ None）。既存の呼び出しとテストのため。"""
+    return property(lambda self: getattr(self.current_tab(), name, None))
 
 
 class MainWindow(QMainWindow):
     instances: list["MainWindow"] = []
 
-    document_changed = Signal()  # ページ構成が変わった
     document_loaded = Signal()
+
+    doc = _current("doc")
+    undo_stack = _current("undo_stack")
+    render_service = _current("render_service")
+    page_view = _current("page_view")
+    thumbnails = _current("thumbnails")
+    document_changed = _current("document_changed")
 
     def __init__(self):
         super().__init__()
-        self.doc: PdfDocument | None = None
-        self.render_service: RenderService | None = None  # 文書を開いた時に作る
         self.password_retry = False  # dialogs.ask_password が「違う」の注記に使う
-        self._saving = False
-        self._save_result: SaveFailedError | None = None
-        self._save_loop: QEventLoop | None = None
-        self._save_signals: _SaveSignals | None = None
-        self.undo_stack = make_undo_stack(self)
+        self._saving = False  # どれかのタブが保存中。ウィンドウ全体が操作を止める
+        self._active_tab: DocumentTab | None = None
+        self._closed = False
         self.setAcceptDrops(True)
         self.resize(1000, 750)
 
-        # 文書がない間は案内文、開いたらページ表示
+        # 文書がない間は案内文、開いたらタブ
         self._placeholder = QLabel(messages.EMPTY_HINT)
         self._placeholder.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.page_view = PageView()
+        self.tab_widget = QTabWidget()
+        self.tab_widget.setDocumentMode(True)
+        self.tab_widget.setTabsClosable(True)
+        self.tab_widget.setMovable(True)
         self._central = QStackedWidget()
         self._central.addWidget(self._placeholder)
-        self._central.addWidget(self.page_view)
+        self._central.addWidget(self.tab_widget)
         self.setCentralWidget(self._central)
 
-        # 左のページ一覧
-        self.thumbnails = ThumbnailPanel()
-        self._pages_dock = QDockWidget(messages.PAGES_DOCK_TITLE, self)
-        self._pages_dock.setFeatures(QDockWidget.DockWidgetFeature.NoDockWidgetFeatures)
-        self._pages_dock.setAllowedAreas(Qt.DockWidgetArea.LeftDockWidgetArea)
-        self._pages_dock.setWidget(self.thumbnails)
-        self.addDockWidget(Qt.DockWidgetArea.LeftDockWidgetArea, self._pages_dock)
-        self.resizeDocks([self._pages_dock], [self.thumbnails.panel_width()],
-                         Qt.Orientation.Horizontal)
-
-        self.document_changed.connect(self._on_document_changed)
-        self.thumbnails.page_activated.connect(self.page_view.scroll_to_page)
-        self.page_view.current_page_changed.connect(self.thumbnails.show_page)
-        self.undo_stack.cleanChanged.connect(self._on_clean_changed)
-        self._closed = False
-
+        self.undo_group = QUndoGroup(self)
         self._build_menus()
-        self.thumbnails.selectionModel().selectionChanged.connect(self._update_page_actions)
-        self._update_page_actions()
-        self._update_title()
+        self.tab_widget.currentChanged.connect(self._on_current_changed)
+        self.tab_widget.tabCloseRequested.connect(self.close_tab)
+        self._on_current_changed()
         MainWindow.instances.append(self)
 
     # --- メニュー ---------------------------------------------------------
+    def _action(self, text: str, shortcut: str | None, slot, menu=None) -> QAction:
+        action = QAction(text, self)
+        if shortcut:
+            action.setShortcut(QKeySequence(shortcut))
+        action.triggered.connect(slot)
+        if menu is not None:
+            menu.addAction(action)
+        return action
+
     def _build_menus(self) -> None:
         bar = self.menuBar()
         file_menu = bar.addMenu(messages.MENU_FILE)
-
-        self.open_action = QAction(messages.ACTION_OPEN, self)
-        self.open_action.setShortcut(QKeySequence("Ctrl+O"))
-        self.open_action.triggered.connect(self._choose_and_open)
-        file_menu.addAction(self.open_action)
-
-        self.save_action = QAction(messages.ACTION_SAVE, self)
-        self.save_action.setShortcut(QKeySequence("Ctrl+S"))
-        self.save_action.setEnabled(False)  # 文書を開くまでは使えない
-        self.save_action.triggered.connect(lambda: self.save())
-        file_menu.addAction(self.save_action)
-        self.save_as_action = QAction(messages.ACTION_SAVE_AS, self)
-        self.save_as_action.setShortcut(QKeySequence("Ctrl+Shift+S"))
-        self.save_as_action.setEnabled(False)
-        self.save_as_action.triggered.connect(lambda: self.save_as())
-        file_menu.addAction(self.save_as_action)
-
+        self.open_action = self._action(messages.ACTION_OPEN, "Ctrl+O", self._choose_and_open,
+                                        file_menu)
+        self.close_tab_action = self._action(messages.ACTION_CLOSE_TAB, "Ctrl+W",
+                                             self.close_current_tab, file_menu)
         file_menu.addSeparator()
-        self.quit_action = QAction(messages.ACTION_QUIT, self)
-        self.quit_action.triggered.connect(self.close)
-        file_menu.addAction(self.quit_action)
+        self.save_action = self._action(messages.ACTION_SAVE, "Ctrl+S", self.save, file_menu)
+        self.save_as_action = self._action(messages.ACTION_SAVE_AS, "Ctrl+Shift+S", self.save_as,
+                                           file_menu)
+        file_menu.addSeparator()
+        self.quit_action = self._action(messages.ACTION_QUIT, None, self.close, file_menu)
+
+        # タブの切り替え（メニューには出さない）
+        self.next_tab_action = self._action(messages.ACTION_NEXT_TAB, None, self.next_tab)
+        self.next_tab_action.setShortcuts(QKeySequence.StandardKey.NextChild)
+        self.prev_tab_action = self._action(messages.ACTION_PREV_TAB, None, self.previous_tab)
+        self.prev_tab_action.setShortcuts(QKeySequence.StandardKey.PreviousChild)
+        self.addActions([self.next_tab_action, self.prev_tab_action])
 
         edit_menu = bar.addMenu(messages.MENU_EDIT)
-        self.undo_action = self.undo_stack.createUndoAction(self, messages.UNDO_PREFIX)
+        self.undo_action = self.undo_group.createUndoAction(self, messages.UNDO_PREFIX)
         self.undo_action.setShortcut(QKeySequence("Ctrl+Z"))
-        self.redo_action = self.undo_stack.createRedoAction(self, messages.REDO_PREFIX)
+        self.redo_action = self.undo_group.createRedoAction(self, messages.REDO_PREFIX)
         self.redo_action.setShortcut(QKeySequence("Ctrl+Y"))
         edit_menu.addAction(self.undo_action)
         edit_menu.addAction(self.redo_action)
 
-        # ページメニューとサムネイルの右クリックメニューは同じ QAction を使う
+        # ページメニューとサムネイルの右クリックメニューは同じ QAction を使う。
+        # 各タブのサムネイル一覧に足すので、ここでは並び（区切りを含む）を作っておく
         self.page_menu = bar.addMenu(messages.MENU_PAGE)
-        self.delete_pages_action = self._page_action(
+        self.delete_pages_action = self._action(
             messages.ACTION_DELETE_PAGES, "Delete", self.delete_selected_pages)
-        # Delete はページ一覧にフォーカスがある時だけ効かせる
-        self.delete_pages_action.setShortcutContext(
-            Qt.ShortcutContext.WidgetWithChildrenShortcut)
-        self.insert_blank_action = self._page_action(
+        self.insert_blank_action = self._action(
             messages.ACTION_INSERT_BLANK, None, self.insert_blank_page)
-        self.insert_pdf_action = self._page_action(
+        self.insert_pdf_action = self._action(
             messages.ACTION_INSERT_PDF, None, self.insert_pdf_pages)
-        self.rotate_right_action = self._page_action(
+        self.rotate_right_action = self._action(
             messages.ACTION_ROTATE_RIGHT, "Ctrl+R", lambda: self.rotate_selected(90))
-        self.rotate_left_action = self._page_action(
+        self.rotate_left_action = self._action(
             messages.ACTION_ROTATE_LEFT, "Ctrl+Shift+R", lambda: self.rotate_selected(-90))
+        # Delete はページ一覧にフォーカスがある時だけ効かせる
+        self.delete_pages_action.setShortcutContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
         groups = [[self.delete_pages_action],
                   [self.insert_blank_action, self.insert_pdf_action],
                   [self.rotate_right_action, self.rotate_left_action]]
+        self._thumbnail_actions: list[QAction] = []
         for n, group in enumerate(groups):
             if n:
                 self.page_menu.addSeparator()
                 separator = QAction(self)
                 separator.setSeparator(True)
-                self.thumbnails.addAction(separator)
+                self._thumbnail_actions.append(separator)
             self.page_menu.addActions(group)
-            self.thumbnails.addActions(group)
+            self._thumbnail_actions += group
 
         self.view_menu = bar.addMenu(messages.MENU_VIEW)
         # JIS 配列では「+」に Shift が要るので、Ctrl+; と Ctrl+= でも拡大する（表示は Ctrl++）
-        self.zoom_in_action = self._view_action(
-            messages.ACTION_ZOOM_IN, "Ctrl++", self.page_view.zoom_in)
+        self.zoom_in_action = self._action(messages.ACTION_ZOOM_IN, "Ctrl++",
+                                           lambda: self._view("zoom_in"), self.view_menu)
         self.zoom_in_action.setShortcuts(
             [QKeySequence("Ctrl++"), QKeySequence("Ctrl+;"), QKeySequence("Ctrl+=")])
-        self.zoom_out_action = self._view_action(
-            messages.ACTION_ZOOM_OUT, "Ctrl+-", self.page_view.zoom_out)
-        self.fit_width_action = self._view_action(
-            messages.ACTION_FIT_WIDTH, "Ctrl+1", self.page_view.fit_width)
-        self.fit_page_action = self._view_action(
-            messages.ACTION_FIT_PAGE, "Ctrl+0", self.page_view.fit_page)
-
-    def _view_action(self, text: str, shortcut: str, slot) -> QAction:
-        action = QAction(text, self)
-        action.setShortcut(QKeySequence(shortcut))
-        action.setEnabled(False)  # 文書を開くまでは使えない
-        action.triggered.connect(slot)
-        self.view_menu.addAction(action)
-        return action
+        self.zoom_out_action = self._action(messages.ACTION_ZOOM_OUT, "Ctrl+-",
+                                            lambda: self._view("zoom_out"), self.view_menu)
+        self.fit_width_action = self._action(messages.ACTION_FIT_WIDTH, "Ctrl+1",
+                                             lambda: self._view("fit_width"), self.view_menu)
+        self.fit_page_action = self._action(messages.ACTION_FIT_PAGE, "Ctrl+0",
+                                            lambda: self._view("fit_page"), self.view_menu)
 
     def _view_actions(self) -> list[QAction]:
         return [self.zoom_in_action, self.zoom_out_action,
                 self.fit_width_action, self.fit_page_action]
 
-    def _page_action(self, text: str, shortcut: str | None, slot) -> QAction:
-        action = QAction(text, self)
-        if shortcut:
-            action.setShortcut(QKeySequence(shortcut))
-        action.triggered.connect(slot)
-        return action
+    def _view(self, name: str) -> None:
+        tab = self.current_tab()
+        if tab is not None:
+            getattr(tab.page_view, name)()
 
-    def _update_page_actions(self) -> None:
+    def _update_actions(self) -> None:
+        """文書があれば保存・表示、保存中でなければ開く・閉じる・タブの切り替え・元に戻す。"""
+        idle = not self._saving
+        has_doc = self.current_tab() is not None
+        self.open_action.setEnabled(idle)
+        for action in (self.save_action, self.save_as_action, self.close_tab_action):
+            action.setEnabled(has_doc and idle)
+        for action in self._view_actions():
+            action.setEnabled(has_doc)
+        for action in (self.next_tab_action, self.prev_tab_action):
+            action.setEnabled(idle and self.tab_widget.count() > 1)
+        self.undo_action.setEnabled(idle and self.undo_group.canUndo())
+        self.redo_action.setEnabled(idle and self.undo_group.canRedo())
+        self.tab_widget.tabBar().setEnabled(idle)
+        self._update_page_actions()
+
+    def _update_page_actions(self, *_args) -> None:
         """文書があれば追加・挿入、さらに選択があれば削除・回転を使える。"""
-        has_doc = self.doc is not None and not self._saving
-        has_selection = has_doc and bool(self.thumbnails.selected_pages())
+        tab = self.current_tab()
+        has_doc = tab is not None and not self._saving
+        has_selection = has_doc and bool(tab.thumbnails.selected_pages())
         self.insert_blank_action.setEnabled(has_doc)
         self.insert_pdf_action.setEnabled(has_doc)
         for action in (self.delete_pages_action, self.rotate_right_action,
                        self.rotate_left_action):
             action.setEnabled(has_selection)
+
+    # --- タブ -------------------------------------------------------------
+    def tabs(self) -> list[DocumentTab]:
+        return [self.tab_widget.widget(i) for i in range(self.tab_widget.count())]
+
+    def current_tab(self) -> DocumentTab | None:
+        tab = self.tab_widget.currentWidget()
+        return tab if isinstance(tab, DocumentTab) else None
+
+    def _add_tab(self, tab: DocumentTab) -> None:
+        tab.modified_changed.connect(self._update_title)
+        tab.title_changed.connect(self._update_title)
+        tab.saving_changed.connect(self._on_saving_changed)
+        tab.selection_changed.connect(self._update_page_actions)
+        tab.document_changed.connect(self._update_page_actions)
+        tab.thumbnails.addActions(self._thumbnail_actions)
+        self.undo_group.addStack(tab.undo_stack)
+        self.tab_widget.setCurrentIndex(self.tab_widget.addTab(tab, tab.title()))
+        self._update_title()
+        tab.page_view.setFocus()
+
+    def _on_current_changed(self, _index: int = -1) -> None:
+        tab = self.current_tab()
+        if self._saving and self._active_tab is not None and tab is not self._active_tab:
+            self.tab_widget.setCurrentWidget(self._active_tab)  # 保存中は切り替えない
+            return
+        if self._active_tab is not None and self._active_tab is not tab:
+            self._active_tab.set_active(False)
+        self._active_tab = tab
+        self.undo_group.setActiveStack(tab.undo_stack if tab is not None else None)
+        if tab is not None:
+            tab.set_active(True)
+        self._central.setCurrentWidget(self.tab_widget if tab is not None else self._placeholder)
+        self._update_actions()
+        self._update_title()
+
+    def _switch_tab(self, step: int) -> None:
+        count = self.tab_widget.count()
+        if not self._saving and count > 1:
+            self.tab_widget.setCurrentIndex((self.tab_widget.currentIndex() + step) % count)
+
+    def next_tab(self) -> None:
+        self._switch_tab(1)
+
+    def previous_tab(self) -> None:
+        self._switch_tab(-1)
+
+    def _update_title(self, *_args) -> None:
+        # [*] は Qt が未保存の印（*）に置き換える
+        tab = self.current_tab()
+        if tab is not None and tab.doc.path is not None:
+            self.setWindowTitle(f"{tab.title()}[*] - {messages.APP_NAME}")
+        else:
+            self.setWindowTitle(messages.APP_NAME)
+        self.setWindowModified(tab is not None and tab.is_modified())
+        for i, each in enumerate(self.tabs()):
+            self.tab_widget.setTabText(i, each.title() + ("*" if each.is_modified() else ""))
+            self.tab_widget.setTabToolTip(i, each.tool_tip())
+
+    def _on_saving_changed(self, saving: bool) -> None:
+        """保存中はファイルを開く・保存・閉じる・タブの切り替え・ページ操作・元に戻すを止める。"""
+        self._saving = saving
+        self._update_actions()
+
+    def close_tab(self, index: int) -> bool:
+        """タブを閉じる。未保存なら、そのタブに切り替えてから尋ねる。"""
+        tab = self.tab_widget.widget(index)
+        if self._saving or not isinstance(tab, DocumentTab):
+            return False
+        if tab.is_modified():
+            self.tab_widget.setCurrentWidget(tab)
+        if not tab.confirm_close():
+            return False
+        self._remove_tab(tab)
+        return True
+
+    def close_current_tab(self) -> bool:
+        return self.close_tab(self.tab_widget.currentIndex())
+
+    def _remove_tab(self, tab: DocumentTab) -> None:
+        if tab is self._active_tab:
+            self._active_tab = None
+        self.undo_group.removeStack(tab.undo_stack)
+        self.tab_widget.removeTab(self.tab_widget.indexOf(tab))
+        tab.shutdown()  # 受け口を切り離し、描画スレッドを止めてから文書を閉じる
+        tab.deleteLater()
+        self._update_title()
+
+    # --- 表示中のタブへの操作（メニューと既存の呼び出しから） ---------------
+    def _on_tab(self, method: str, *args):
+        tab = self.current_tab()
+        if tab is None or self._saving:
+            return False
+        return getattr(tab, method)(*args)
+
+    def delete_selected_pages(self) -> None:
+        self._on_tab("delete_selected_pages")
+
+    def insert_blank_page(self) -> None:
+        self._on_tab("insert_blank_page")
+
+    def insert_pdf_pages(self) -> None:
+        self._on_tab("insert_pdf_pages")
+
+    def rotate_selected(self, delta: int) -> None:
+        self._on_tab("rotate_selected", delta)
+
+    def save(self) -> bool:
+        return bool(self._on_tab("save"))
+
+    def save_as(self) -> bool:
+        return bool(self._on_tab("save_as"))
 
     # --- 開く -------------------------------------------------------------
     def _choose_and_open(self) -> None:
@@ -241,22 +317,25 @@ class MainWindow(QMainWindow):
                 self.open_path(path)
 
     @classmethod
-    def _window_showing(cls, path: Path) -> "MainWindow | None":
+    def _tab_showing(cls, path: Path) -> "tuple[MainWindow, DocumentTab] | None":
         for window in cls.instances:
-            if window.doc is not None and window.doc.path and _same_file(window.doc.path, path):
-                return window
+            for tab in window.tabs():
+                if tab.doc.path is not None and _same_file(tab.doc.path, path):
+                    return window, tab
         return None
 
     def open_path(self, path: Path) -> bool:
         if self._saving:
             return False
-        existing = self._window_showing(path)
+        existing = self._tab_showing(path)
         if existing is not None:
-            existing.show()
-            existing.raise_()
-            existing.activateWindow()
+            window, tab = existing
+            window.tab_widget.setCurrentWidget(tab)
+            window.show()
+            window.raise_()
+            window.activateWindow()
             return True
-        if self.doc is not None:  # 文書のあるウィンドウは触らず、新しいウィンドウで開く
+        if self.tabs():  # 文書のあるウィンドウは触らず、新しいウィンドウで開く
             window = MainWindow()
             window.show()
             if window.open_path(path):
@@ -297,247 +376,20 @@ class MainWindow(QMainWindow):
             self.password_retry = False
 
     def _attach(self, doc: PdfDocument) -> bool:
-        """開いた文書を表示する。表示の準備で失敗したら（壊れたページなど）文書を閉じて知らせ、
-        ウィンドウは空のまま使える状態に戻す。"""
+        """開いた文書を新しいタブで表示する。表示の準備で失敗したら（壊れたページなど）
+        タブは作らず（文書は DocumentTab が閉じる）、知らせる。"""
         try:
-            self._show_document(doc)
+            tab = DocumentTab(doc)
         except Exception:  # noqa: BLE001 - どんな失敗でもアプリは落とさない
             log.exception("could not show the opened document")
-            self._release_document()
             name = doc.path.name if doc.path else messages.APP_NAME
             dialogs.show_error(self, NotAPdfError(messages.OPEN_SHOW_FAILED.format(name=name)))
             return False
+        self._add_tab(tab)
         self.document_loaded.emit()
         if doc.is_signed:
             dialogs.show_info(self, messages.SIGNED_NOTICE)
         return True
-
-    def _show_document(self, doc: PdfDocument) -> None:
-        self.doc = doc
-        self.undo_stack.clear()
-        self.render_service = RenderService(doc, parent=self)
-        self.page_view.set_document(doc, self.render_service)
-        self.thumbnails.set_document(doc, self.render_service, self.undo_stack,
-                                     doc_changed=self.document_changed.emit)
-        self.thumbnails.show_page(self.page_view.current_page())
-        self._central.setCurrentWidget(self.page_view)
-        self.page_view.setFocus()
-        self._set_document_actions(True)
-        self._update_title()
-
-    def _set_document_actions(self, enabled: bool) -> None:
-        for action in self._view_actions():
-            action.setEnabled(enabled)
-        self.save_action.setEnabled(enabled)
-        self.save_as_action.setEnabled(enabled)
-        self._update_page_actions()
-
-    def _release_document(self) -> None:
-        """表示から外し、描画スレッドを止めてから文書を閉じる（RenderService の約束）。"""
-        doc, service = self.doc, self.render_service
-        self.doc = None
-        self.render_service = None
-        self.page_view.set_document(None, None)
-        self.thumbnails.set_document(None, None, None)
-        if service is not None:
-            service.shutdown()
-        if doc is not None:
-            doc.close()
-        self.undo_stack.clear()
-        self._central.setCurrentWidget(self._placeholder)
-        self._set_document_actions(False)
-        self._update_title()
-
-    def _on_document_changed(self) -> None:
-        """文書は既に変わっている。古い画像を捨ててから並びを読み直す。"""
-        if self.render_service is not None:
-            self.render_service.invalidate()
-            self.page_view.reload_layout()
-            self.thumbnails.refresh()
-            self._update_page_actions()
-
-    def _update_title(self) -> None:
-        # [*] は Qt が未保存の印（*）に置き換える。cleanChanged で setWindowModified する
-        if self.doc is not None and self.doc.path is not None:
-            self.setWindowTitle(f"{self.doc.path.name}[*] - {messages.APP_NAME}")
-        else:
-            self.setWindowTitle(messages.APP_NAME)
-
-    # --- ページ操作 -------------------------------------------------------
-    def _run(self, command) -> bool:
-        """文書を変える操作はすべてここを通す。失敗は知らせ、文書は変わらない。"""
-        try:
-            push_command(self.undo_stack, command)
-        except PdfEditorError as err:
-            dialogs.show_error(self, err)
-            return False
-        return True
-
-    def _insert_position(self) -> int:
-        """選択中の最後のページの次。選択がなければ末尾。"""
-        selected = self.thumbnails.selected_pages()
-        return selected[-1] + 1 if selected else self.doc.page_count
-
-    def _show_inserted(self, at: int, count: int) -> None:
-        self.thumbnails.select_pages(range(at, at + count))
-        self.page_view.scroll_to_page(at)
-
-    def delete_selected_pages(self) -> None:
-        selected = self.thumbnails.selected_pages()
-        if self.doc is None or not selected:
-            return
-        if self._run(DeletePagesCommand(self.doc, selected, self.document_changed.emit)):
-            self.thumbnails.select_pages([min(selected[0], self.doc.page_count - 1)])
-
-    def insert_blank_page(self) -> None:
-        if self.doc is None:
-            return
-        at = self._insert_position()
-        size = dialogs.ask_blank_page(self, self.doc.default_blank_size(at))
-        if size is None:
-            return
-        width, height = size
-        if self._run(InsertBlankCommand(self.doc, at, width, height, self.document_changed.emit)):
-            self._show_inserted(at, 1)
-
-    def insert_pdf_pages(self) -> None:
-        if self.doc is None:
-            return
-        name, _ = QFileDialog.getOpenFileName(
-            self, messages.INSERT_DIALOG_TITLE, "", messages.OPEN_DIALOG_FILTER
-        )
-        if not name:
-            return
-        path = Path(name)
-        try:
-            data = path.read_bytes()  # 先に読むので、開いている文書自身も挿入できる
-        except OSError:
-            dialogs.show_error(self, NotAPdfError(messages.INSERT_READ_FAILED.format(name=path.name)))
-            return
-        at = self._insert_position()
-        before = self.doc.page_count
-        password: str | None = None
-        self.password_retry = False
-        try:
-            while True:
-                command = InsertPdfCommand(self.doc, data, at, password, self.document_changed.emit)
-                try:
-                    push_command(self.undo_stack, command)
-                    break
-                except (PasswordRequiredError, WrongPasswordError):
-                    pass
-                except PdfEditorError as err:
-                    dialogs.show_error(self, err)
-                    return
-                self.password_retry = password is not None  # 2回目以降は「違う」を添える
-                password = dialogs.ask_password(self, "user")
-                if password is None:
-                    return
-        finally:
-            self.password_retry = False
-        self._show_inserted(at, self.doc.page_count - before)
-
-    def rotate_selected(self, delta: int) -> None:
-        selected = self.thumbnails.selected_pages()
-        if self.doc is None or not selected:
-            return
-        self._run(RotatePagesCommand(self.doc, selected, delta, self.document_changed.emit))
-
-    # --- 保存 -------------------------------------------------------------
-    def save(self) -> bool:
-        """上書き保存。保存先がまだない（または親フォルダがない）ときは名前を付けて保存。"""
-        if self._saving or self.doc is None:
-            return False
-        path = self.doc.path
-        if path is None or not (path.parent.is_dir() and os.access(path.parent, os.W_OK)):
-            return self.save_as()
-        return self._save_to(None)
-
-    def save_as(self) -> bool:
-        if self._saving or self.doc is None:
-            return False
-        target = self._ask_save_path()
-        return target is not None and self._save_to(target)
-
-    def _ask_save_path(self) -> Path | None:
-        path = self.doc.path
-        name, _ = QFileDialog.getSaveFileName(
-            self, messages.SAVE_DIALOG_TITLE, str(path) if path else "",
-            messages.OPEN_DIALOG_FILTER)
-        if not name:
-            return None
-        target = Path(name)
-        if target.suffix.lower() != ".pdf":
-            target = target.with_name(target.name + ".pdf")
-        return target
-
-    def _save_to(self, target: Path | None) -> bool:
-        """成功するか、利用者がやめるまで続ける。成功した時だけ True。"""
-        while True:
-            err = self._save_in_background(target)
-            if err is None:
-                self.undo_stack.setClean()
-                self._update_title()
-                return True
-            if dialogs.show_save_error(self, err) != "save_as":
-                return False
-            target = self._ask_save_path()
-            if target is None:
-                return False
-
-    def _save_in_background(self, target: Path | None) -> SaveFailedError | None:
-        """doc.save を別スレッドで走らせ、終わるまでイベントを回して待つ。"""
-        self._set_saving(True)
-        loop = QEventLoop()  # 親なし。終わったら deleteLater
-        self._save_loop = loop
-        self._save_result = None
-        progress: QProgressDialog | None = None
-
-        def show_progress() -> None:
-            nonlocal progress
-            progress = QProgressDialog(messages.SAVING_TEXT, "", 0, 0, self)
-            progress.setCancelButton(None)  # 中断できない
-            progress.setWindowModality(Qt.WindowModality.WindowModal)
-            progress.setMinimumDuration(0)
-            progress.show()
-
-        timer = QTimer(self)
-        timer.setSingleShot(True)
-        timer.timeout.connect(show_progress)
-        signals = _SaveSignals()
-        self._save_signals = signals  # 作業スレッドが使い終わるまで保持する
-        signals.done.connect(self._on_save_done, Qt.ConnectionType.QueuedConnection)
-        try:
-            timer.start(PROGRESS_DELAY_MS)
-            QThreadPool.globalInstance().start(_SaveTask(self.doc, target, signals))
-            loop.exec()
-        finally:
-            timer.stop()
-            timer.deleteLater()
-            if progress is not None:
-                progress.close()
-                progress.deleteLater()
-            self._save_loop = None
-            loop.deleteLater()
-            self._set_saving(False)
-        return self._save_result
-
-    def _on_save_done(self, result) -> None:
-        self._save_result = result
-        if self._save_loop is not None:
-            self._save_loop.quit()
-
-    def _set_saving(self, saving: bool) -> None:
-        """保存中はファイルを開く・保存・ページ操作・元に戻すを受け付けない。"""
-        self._saving = saving
-        has_doc = self.doc is not None
-        self.open_action.setEnabled(not saving)
-        self.save_action.setEnabled(has_doc and not saving)
-        self.save_as_action.setEnabled(has_doc and not saving)
-        self.undo_action.setEnabled(not saving and self.undo_stack.canUndo())
-        self.redo_action.setEnabled(not saving and self.undo_stack.canRedo())
-        self.thumbnails.setEnabled(not saving)  # 並べ替えのドラッグも止める
-        self._update_page_actions()
 
     # --- ドロップ ---------------------------------------------------------
     @staticmethod
@@ -561,34 +413,22 @@ class MainWindow(QMainWindow):
             self.handle_dropped_paths(paths)
 
     # --- 終了 -------------------------------------------------------------
-    def _on_clean_changed(self, clean: bool) -> None:
-        self.setWindowModified(not clean)
-
     def closeEvent(self, event) -> None:
+        """未保存のタブを左から順に、そのタブに切り替えて尋ねる。閉じてよいタブはその場で閉じ、
+        「キャンセル」（または保存の失敗）ならそこで止めて、残りのタブとウィンドウは開いたまま。"""
         if self._saving:  # 保存の最中は閉じない
             event.ignore()
             return
-        if self.doc is not None and not self.undo_stack.isClean():
-            name = self.doc.path.name if self.doc.path else messages.APP_NAME
-            answer = dialogs.ask_unsaved(self, name)
-            if answer == "cancel" or (answer == "save" and not self.save()):
-                event.ignore()
-                return
+        for tab in self.tabs():
+            if tab.is_modified():
+                self.tab_widget.setCurrentWidget(tab)
+                if not tab.confirm_close():
+                    event.ignore()
+                    return
+                self._remove_tab(tab)
+        for tab in self.tabs():
+            self._remove_tab(tab)
         if self in MainWindow.instances:
             MainWindow.instances.remove(self)
-        # 履歴は、ウィンドウが破棄される時に片付けられて「未保存の印」の通知を出す。
-        # 破棄済みのウィンドウに届くと例外になるので、閉じると決まったここで切り離す。
-        if not self._closed:
-            self._closed = True
-            self.undo_stack.cleanChanged.disconnect(self._on_clean_changed)
-            self.setWindowModified(False)
-        self.undo_stack.clear()
-        self.page_view.set_document(None, None)
-        self.thumbnails.set_document(None, None, None)
-        if self.render_service is not None:  # 描画スレッドを止めてから文書を閉じる
-            self.render_service.shutdown()
-            self.render_service = None
-        if self.doc is not None:
-            self.doc.close()
-            self.doc = None
+        self._closed = True
         super().closeEvent(event)

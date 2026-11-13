@@ -7,7 +7,7 @@ from PySide6.QtCore import QTimer
 from PySide6.QtWidgets import QProgressDialog
 
 from pdfeditor.core.document import PdfDocument
-from pdfeditor.ui import main_window
+from pdfeditor.ui import document_tab
 from pdfeditor.ui.main_window import MainWindow
 from pdfeditor.ui.page_commands import MovePagesCommand, push_command
 from tests.helpers import lock_file, open_window, select
@@ -143,7 +143,7 @@ def test_progress_only_when_slow(qtbot, simple_pdf, monkeypatch):
     monkeypatch.setattr(QProgressDialog, "show", lambda self: shown.append(self.labelText()))
     w = open_window(qtbot, simple_pdf)
     assert w.save() and shown == []  # 速い保存では出ない
-    monkeypatch.setattr(main_window, "PROGRESS_DELAY_MS", 20)
+    monkeypatch.setattr(document_tab, "PROGRESS_DELAY_MS", 20)  # 保存の流れはタブへ移った
     real = w.doc.save
     monkeypatch.setattr(w.doc, "save", lambda target=None: (time.sleep(0.4), real(target))[1])
     assert w.save() and shown == ["保存しています…"]

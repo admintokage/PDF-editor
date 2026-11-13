@@ -21,6 +21,9 @@ ACTION_OPEN = "開く(&O)..."
 ACTION_SAVE = "上書き保存(&S)"
 ACTION_SAVE_AS = "名前を付けて保存(&A)..."
 ACTION_QUIT = "終了(&X)"
+ACTION_CLOSE_TAB = "閉じる(&C)"
+ACTION_NEXT_TAB = "次のタブ"
+ACTION_PREV_TAB = "前のタブ"
 ACTION_ZOOM_IN = "拡大(&I)"
 ACTION_ZOOM_OUT = "縮小(&O)"
 ACTION_FIT_WIDTH = "幅に合わせる(&W)"
@@ -41,7 +44,6 @@ OPEN_SHOW_FAILED = "「{name}」を表示できません。PDF ファイルが�
 SIGNED_NOTICE = "この PDF には電子署名があります。編集して保存すると署名は無効になります。"
 
 # ページ一覧と挿入
-PAGES_DOCK_TITLE = "ページ"
 INSERT_DIALOG_TITLE = "挿入する PDF を選ぶ"
 INSERT_READ_FAILED = "「{name}」を開けません。ファイルが見つからないか、読み取れません。"
 BLANK_DIALOG_TITLE = "空白ページを追加"
