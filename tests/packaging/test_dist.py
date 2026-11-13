@@ -91,7 +91,9 @@ def test_license_and_readme_at_top_of_folder():
     assert (APP_DIR / "LICENSE").is_file()
     assert (APP_DIR / "README.txt").is_file()
     notices = (APP_DIR / "THIRD-PARTY-NOTICES.txt").read_text(encoding="utf-8")
-    assert all(name in notices for name in ("PyMuPDF", "Artifex", "PySide6", "LGPL-3.0", "Python"))
+    assert all(name in notices for name in ("PyMuPDF", "Artifex", "PySide6", "LGPL-3.0", "Python",
+                                            "FreeType", "HarfBuzz", "OpenJPEG", "jbig2dec",
+                                            "libpng", "PCRE2", "zlib"))
     with zipfile.ZipFile(DIST / "PDF-editor.zip") as z:
         assert "PDF-editor/THIRD-PARTY-NOTICES.txt" in z.namelist()
 

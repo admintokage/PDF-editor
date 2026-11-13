@@ -13,6 +13,21 @@ PDF-editor 本体は GNU Affero General Public License v3.0 (AGPL-3.0) で配布
      （全文は同じフォルダの LICENSE と同じものです）
    - 入手先: https://github.com/pymupdf/PyMuPDF / https://mupdf.com/
    - 配布物の場所: _internal\pymupdf
+   - MuPDF の中に組み込まれているライブラリ（_internal\pymupdf\mupdfcpp64.dll、_mupdf.pyd）:
+       FreeType ............ FreeType License (FTL)       https://freetype.org/
+       HarfBuzz ............ MIT License ("Old MIT")       https://github.com/harfbuzz/harfbuzz
+       libjpeg ............. IJG License (Independent JPEG Group)  https://ijg.org/
+       OpenJPEG ............ BSD 2-Clause License          https://www.openjpeg.org/
+       jbig2dec ............ AGPL-3.0 (Artifex)            https://jbig2dec.com/
+       Little CMS (lcms2mt). MIT License                   https://www.littlecms.com/
+       zlib ................ zlib License                  https://zlib.net/
+       Brotli .............. MIT License                   https://github.com/google/brotli
+       MuJS ................ ISC License (Artifex)         https://mujs.com/
+       Gumbo ............... Apache License 2.0            https://github.com/google/gumbo-parser
+       extract ............. AGPL-3.0 (Artifex)            https://github.com/ArtifexSoftware/extract
+       Tesseract OCR ....... Apache License 2.0            https://github.com/tesseract-ocr/tesseract
+       Leptonica ........... BSD 2-Clause 系の Leptonica License  http://www.leptonica.org/
+       zxing-cpp ........... Apache License 2.0            https://github.com/zxing-cpp/zxing-cpp
 
 2. Qt 6 / PySide6 / Shiboken6（画面の部品）
    - 版: Qt 6.12.0 / PySide6-Essentials 6.12.0
@@ -29,6 +44,19 @@ PDF-editor 本体は GNU Affero General Public License v3.0 (AGPL-3.0) で配布
      にあります。
    - Qt の日本語訳（_internal\PySide6\translations の qtbase_ja.qm、qt_ja.qm）も
      Qt の一部として同じライセンスで含めています。
+   - Qt の中に組み込まれているライブラリ（Qt6Core.dll、Qt6Gui.dll、qwindows.dll、qjpeg.dll）:
+       FreeType ............ FreeType License (FTL)       https://freetype.org/
+       HarfBuzz ............ MIT License ("Old MIT")       https://github.com/harfbuzz/harfbuzz
+       libpng .............. PNG Reference Library License v2 (libpng-2.0)  http://www.libpng.org/
+       zlib ................ zlib License                  https://zlib.net/
+       PCRE2 ............... BSD 3-Clause License（PCRE2 Licence）  https://github.com/PCRE2Project/pcre2
+       double-conversion ... BSD 3-Clause License          https://github.com/google/double-conversion
+       TinyCBOR ............ MIT License                   https://github.com/intel/tinycbor
+       SHA-3 / Keccak ...... CC0-1.0（パブリックドメイン）   https://keccak.team/
+       md4c ................ MIT License                   https://github.com/mity/md4c
+       libjpeg-turbo ....... IJG License / BSD 3-Clause License / zlib License
+                                                            https://libjpeg-turbo.org/
+       Unicode のデータ .... Unicode License v3            https://www.unicode.org/license.txt
 
 3. Python（実行環境）
    - 版: Python 3.12
@@ -41,3 +69,16 @@ PDF-editor 本体は GNU Affero General Public License v3.0 (AGPL-3.0) で配布
    - 権利者: PyInstaller Development Team
    - ライセンス: GNU General Public License v2.0 以降（起動部の再配布を認める例外付き）
    - 入手先: https://pyinstaller.org/ / https://github.com/pyinstaller/pyinstaller
+
+
+この一覧の作り方
+----------------
+インストールした PyMuPDF 1.28.2 と PySide6-Essentials 6.12.0 のパッケージには、組み込み
+ライブラリの一覧（第三者ソフトウェアのお知らせ）が入っていません（パッケージのライセンス欄は
+それぞれ "Dual Licensed - GNU AFFERO GPL 3.0 or Artifex Commercial License"、
+"LGPL-3.0-only OR GPL-2.0-only OR GPL-3.0-only" だけです）。そこでこの一覧は、
+  (1) 配布物の DLL に含まれる各ライブラリの識別文字列（FreeType、HarfBuzz、OpenJPEG、
+      Tesseract、Brotli、zxing-cpp、libpng、PCRE2、TinyCBOR、Keccak など）を調べた結果と、
+  (2) MuPDF の thirdparty フォルダと、Qt の「Licenses Used in Qt」に載っている、それぞれの
+      版の組み込みライブラリの一覧
+をもとにまとめました。各ライブラリのライセンスの全文は、上の入手先で読めます。
