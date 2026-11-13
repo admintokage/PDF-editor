@@ -49,7 +49,11 @@ class PageView(QAbstractScrollArea):
         self._images: dict[int, tuple[float, QImage]] = {}  # ページ -> (描画倍率, 画像)
         self._near: set[int] = set()
         self._current = -1
+        # scroll_to_page で選んだページ。文書の端で上端まで送れない時も「今のページ」とする。
+        # 利用者がスクロールするか、配置が変わるまで有効
+        self._pinned: int | None = None
         self._relayouting = False
+        self._moving = False  # 自分でスクロール位置を動かしている間
 
         self._render_timer = QTimer(self)
         self._render_timer.setSingleShot(True)
@@ -79,9 +83,9 @@ class PageView(QAbstractScrollArea):
             if zoom != self.zoom:
                 self.zoom = zoom
                 self.zoom_changed.emit(zoom)
+        self._pinned = None
         self._relayout()
-        self.verticalScrollBar().setValue(0)
-        self.horizontalScrollBar().setValue(0)
+        self._set_scroll(0, 0)
         self._after_view_change()
         self._request_visible()
         self.viewport().update()
@@ -89,6 +93,7 @@ class PageView(QAbstractScrollArea):
     def reload_layout(self) -> None:
         """ページの数・大きさ・回転が変わった後に呼ぶ（invalidate の後）。"""
         keep = self._current
+        self._pinned = None
         self._images.clear()  # 番号がずれた古い画像は使えない
         self._read_sizes()
         if self._sizes and self._fit_mode is not None:  # 回転などで幅が変わったら合わせ直す
@@ -100,7 +105,8 @@ class PageView(QAbstractScrollArea):
         self._relayout()
         if self._sizes and keep >= 0:
             self.scroll_to_page(min(keep, len(self._sizes) - 1))
-        self._after_view_change()
+        else:
+            self._after_view_change()
         self._request_visible()  # invalidate で待ち行列は捨てられている
         self.viewport().update()
 
@@ -186,16 +192,45 @@ class PageView(QAbstractScrollArea):
         return list(range(first, last + 1))
 
     def current_page(self) -> int:
-        """画面の縦中央にあるページ。文書がなければ -1。"""
+        """画面の上端に出ているページ。scroll_to_page で選んだページが文書の端のため上端まで
+        送れない時は、そのページ。文書がなければ -1。"""
         if not self._sizes:
             return -1
-        return self._page_at_y(self.verticalScrollBar().value() + self.viewport().height() / 2)
+        if self._pinned is not None and self._pinned < len(self._sizes):
+            return self._pinned
+        return self._top_page()
+
+    def _top_page(self) -> int:
+        """下端が「ビュー上端 + 隙間 + 1px」より下にある最初のページ。
+        上のページの下余白がわずかに見えているだけなら、そのページは数えない。"""
+        y = self.verticalScrollBar().value() + GAP + 1
+        i = max(bisect_right(self._tops, y) - 1, 0)
+        if self._tops[i] + self._sizes[i][1] * self.zoom <= y and i + 1 < len(self._tops):
+            i += 1
+        return i
 
     def scroll_to_page(self, index: int) -> None:
         if not self._sizes:
             return
         index = min(max(index, 0), len(self._sizes) - 1)
-        self.verticalScrollBar().setValue(round(self._tops[index] - GAP))
+        self._set_scroll(v=round(self._tops[index] - GAP))
+        self._settle_current(index)
+
+    def _set_scroll(self, h: int | None = None, v: int | None = None) -> None:
+        """自分でスクロール位置を動かす（利用者のスクロールとは区別する）。"""
+        self._moving = True
+        try:
+            if h is not None:
+                self.horizontalScrollBar().setValue(h)
+            if v is not None:
+                self.verticalScrollBar().setValue(v)
+        finally:
+            self._moving = False
+
+    def _settle_current(self, page: int) -> None:
+        """page を今のページとする。上端に出せなかった時だけ覚えておく。"""
+        self._pinned = page if self._top_page() != page else None
+        self._after_view_change()
 
     # --- 倍率 -------------------------------------------------------------
     def set_zoom(self, z: float) -> None:
@@ -228,21 +263,27 @@ class PageView(QAbstractScrollArea):
         return zoom
 
     def _apply_zoom(self, z: float, anchor: QPointF | None, keep_mode: bool = False) -> None:
-        """倍率を変え、anchor（ビュー座標、既定は中央）の下にあったページ上の点を同じ位置に保つ。"""
+        """倍率を変える。anchor（ビュー座標）があれば、その下にあったページ上の点を同じ位置に
+        保つ。なければ今のページを保つ（上端の基準線にあった点を基準線に戻す）。"""
         if not keep_mode:
             self._fit_mode = None
         z = self._clamp(z)
         if z == self.zoom:
             return
         vp = self.viewport()
-        if anchor is None:
-            anchor = QPointF(vp.width() / 2, vp.height() / 2)
+        keep_current = anchor is None
         held = None
         if self._sizes:
-            index = self._page_at_y(anchor.y() + self.verticalScrollBar().value())
-            rect = self.page_rect(index)
-            held = (index, (anchor.x() - rect.left()) / self.zoom,
-                    (anchor.y() - rect.top()) / self.zoom)
+            if keep_current:
+                index = self.current_page()
+                rect = self.page_rect(index)
+                anchor = QPointF(vp.width() / 2, GAP + 1)
+                py = max(0.0, (anchor.y() - rect.top()) / self.zoom)
+            else:
+                index = self._page_at_y(anchor.y() + self.verticalScrollBar().value())
+                rect = self.page_rect(index)
+                py = (anchor.y() - rect.top()) / self.zoom
+            held = (index, (anchor.x() - rect.left()) / self.zoom, py)
         self.zoom = z
         # 古い倍率の画像を引き伸ばして出しておき、落ち着いてから頼む。
         # 動いている間は scrollContentsBy も頼まない
@@ -250,11 +291,14 @@ class PageView(QAbstractScrollArea):
         self._relayout()
         if held is not None:
             index, px, py = held
-            self.horizontalScrollBar().setValue(
-                round(self._page_left(index) + px * z - anchor.x()))
-            self.verticalScrollBar().setValue(round(self._tops[index] + py * z - anchor.y()))
+            self._set_scroll(round(self._page_left(index) + px * z - anchor.x()),
+                             round(self._tops[index] + py * z - anchor.y()))
         self.zoom_changed.emit(z)
-        self._after_view_change()
+        if held is not None and keep_current:
+            self._settle_current(held[0])
+        else:
+            self._pinned = None
+            self._after_view_change()
         self.viewport().update()
 
     @staticmethod
@@ -302,19 +346,21 @@ class PageView(QAbstractScrollArea):
         self.viewport().update()
         if self._relayouting:
             return
-        self._after_view_change()
+        if not self._moving:  # 利用者のスクロール。今のページは上端で決まる
+            self._pinned = None
+            self._after_view_change()
+        # 自分で動かした時は、呼び出し側が最後に今のページを決める
         if not self._render_timer.isActive():  # 倍率変更の直後は落ち着くのを待つ
             self._request_visible()
 
     def resizeEvent(self, event) -> None:
         super().resizeEvent(event)
+        page = self.current_page()
         if self._sizes and self._fit_mode is not None:
-            page = self.current_page()
-            # 上端を基準に合わせ直す（先頭を見ている時は先頭のまま）
-            top = QPointF(self.viewport().width() / 2, 0)
-            self._apply_zoom(self._fit_zoom(self._fit_mode, page), top, keep_mode=True)
+            self._apply_zoom(self._fit_zoom(self._fit_mode, page), None, keep_mode=True)
         self._relayout()
-        self._after_view_change()
+        if self._sizes:
+            self._settle_current(page)  # 大きさが変わっても今のページを保つ
         self._render_timer.start()
 
     def showEvent(self, event) -> None:

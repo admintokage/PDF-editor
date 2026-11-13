@@ -1,4 +1,5 @@
 """連続スクロール表示のテスト。"""
+import pytest
 from PySide6.QtCore import QPoint, QPointF, Qt
 from PySide6.QtGui import QWheelEvent
 from PySide6.QtWidgets import QApplication
@@ -61,6 +62,65 @@ def test_layout_follows_page_changes(qtbot, big_pdf):
 
 
 # ---- 追加のテスト ----
+
+@pytest.mark.parametrize("zoom", [0.1, 0.25, 1.0, 3.0])
+def test_scroll_to_page_makes_it_current(qtbot, big_pdf, zoom):
+    v = make_view(qtbot, big_pdf(50))
+    v.set_zoom(zoom)
+    for i in (0, 1, 25, 48, 49, 25, 0):
+        got = []
+        v.current_page_changed.connect(got.append)
+        before = v.current_page()
+        v.scroll_to_page(i)
+        v.current_page_changed.disconnect(got.append)
+        assert v.current_page() == i
+        assert got == ([] if before == i else [i])  # 途中のページを経由して知らせない
+
+
+def test_current_page_is_page_at_top(qtbot, big_pdf):
+    v = make_view(qtbot, big_pdf(10))
+    v.set_zoom(0.5)
+    vbar = v.verticalScrollBar()
+    v.scroll_to_page(3)
+    top = vbar.value()
+    vbar.setValue(top - 1)  # 上のページの下余白が 1px 見えるだけ
+    assert v.current_page() == 3
+    vbar.setValue(top - 14)  # 上のページの本体が 2px 見える
+    assert v.current_page() == 2
+    vbar.setValue(top + 100)  # ページ 3 の途中
+    assert v.current_page() == 3
+
+
+def test_pinned_page_released_by_user_scroll(qtbot, big_pdf):
+    v = make_view(qtbot, big_pdf(50))
+    v.set_zoom(0.1)
+    vbar = v.verticalScrollBar()
+    v.scroll_to_page(49)  # 端なので上端までは送れない
+    assert vbar.value() == vbar.maximum() and v.current_page() == 49
+    with qtbot.waitSignal(v.current_page_changed) as sig:
+        vbar.setValue(vbar.value() - 1)
+    assert sig.args[0] < 49 and v.current_page() == sig.args[0]
+
+
+def test_pinned_page_survives_zoom_and_reload(qtbot, big_pdf):
+    v = make_view(qtbot, big_pdf(50))
+    v.set_zoom(0.1)
+    v.scroll_to_page(48)
+    v.zoom_in(); assert v.current_page() == 48
+    v.zoom_out(); assert v.current_page() == 48
+    v.service.invalidate(); v.reload_layout()
+    assert v.current_page() == 48
+
+
+def test_zoom_keeps_current_page_at_various_zooms(qtbot, big_pdf):
+    v = make_view(qtbot, big_pdf(50))
+    for zoom in (0.1, 0.25, 1.0, 3.0):
+        v.set_zoom(zoom)
+        v.scroll_to_page(20)
+        v.verticalScrollBar().setValue(v.verticalScrollBar().value() + 5)  # 少しずらす
+        v.zoom_in(); assert v.current_page() == 20
+        v.zoom_out(); assert v.current_page() == 20
+
 
 def test_rotation_refits_width(qtbot, simple_pdf):
     v = make_view(qtbot, simple_pdf)
