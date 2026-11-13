@@ -1,0 +1,73 @@
+"""PDF 文書の読み込み。Qt には依存しない。"""
+import threading
+from pathlib import Path
+
+import pymupdf
+
+from pdfeditor.core import errors
+
+_PERM_OWNER_BIT = 4  # authenticate() の戻り値で、権限パスワード一致を示すビット
+
+
+class PdfDocument:
+    def __init__(self, fitz_doc: pymupdf.Document, path: Path | None):
+        self.fitz = fitz_doc
+        self.path = path
+        self.lock = threading.RLock()
+
+    @classmethod
+    def open(cls, path: Path, password: str | None = None) -> "PdfDocument":
+        path = Path(path)
+        try:
+            data = path.read_bytes()  # ファイルを掴みっぱなしにしない
+        except OSError as exc:
+            raise errors.NotAPdfError(
+                f"「{path.name}」を開けません。ファイルが見つからないか、読み取れません。"
+            ) from exc
+        try:
+            doc = pymupdf.open(stream=data, filetype="pdf")
+        except Exception as exc:
+            raise errors.NotAPdfError(
+                f"「{path.name}」を開けません。PDF ファイルではないか、壊れています。"
+            ) from exc
+
+        try:
+            owner_ok = False
+            if doc.needs_pass:
+                if password is None:
+                    raise errors.PasswordRequiredError(
+                        f"「{path.name}」を開くにはパスワードが必要です。"
+                    )
+                result = doc.authenticate(password)
+                if not result:
+                    raise errors.WrongPasswordError("パスワードが違います。")
+                owner_ok = bool(result & _PERM_OWNER_BIT)
+            elif password is not None:
+                owner_ok = bool(doc.authenticate(password) & _PERM_OWNER_BIT)
+
+            if doc.page_count == 0:
+                raise errors.NotAPdfError(
+                    f"「{path.name}」を開けません。PDF ファイルが壊れています。"
+                )
+            if not owner_ok and not doc.permissions & pymupdf.PDF_PERM_MODIFY:
+                raise errors.OwnerPasswordRequiredError(
+                    f"「{path.name}」は編集が制限されています。"
+                    "権限パスワード（編集用のパスワード）を入力してください。"
+                )
+        except BaseException:
+            doc.close()
+            raise
+        return cls(doc, path)
+
+    @property
+    def page_count(self) -> int:
+        return self.fitz.page_count
+
+    @property
+    def is_signed(self) -> bool:
+        return self.fitz.get_sigflags() == 3
+
+    def close(self) -> None:
+        with self.lock:
+            if not self.fitz.is_closed:
+                self.fitz.close()
