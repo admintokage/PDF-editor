@@ -1,0 +1,27 @@
+[project]
+name = "pdf-editor"
+version = "0.1.0"
+description = "Windows 向け PDF エディタ"
+requires-python = ">=3.12,<3.13"
+license = { text = "AGPL-3.0-or-later" }
+dependencies = [
+    "pymupdf>=1.28,<1.29",
+    "PySide6-Essentials>=6.12,<6.13",
+]
+
+[dependency-groups]
+dev = [
+    "pytest",
+    "pytest-qt",
+    "pyinstaller>=6.22,<7",
+    "psutil",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+markers = [
+    "perf: 性能テスト",
+    "dist: 配布物が必要",
+]
+addopts = "-m 'not perf and not dist'"
