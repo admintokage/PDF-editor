@@ -93,12 +93,17 @@ def test_500_pages_sharing_resources_save_with_100_deleted_under_10s(shared_500,
     t = time.perf_counter()
     d.save(tmp_path / "o.pdf")
     elapsed = time.perf_counter() - t
+    d.rotate_by([1], 90)
+    t = time.perf_counter()
+    d.save(tmp_path / "o2.pdf")  # 前の保存で確かめたページは、描き比べ直さない
+    again = time.perf_counter() - t
     d.close()
     r = pymupdf.open(tmp_path / "o.pdf")
     assert r.page_count == 400 and len(r[0].get_images()) == 400  # 削除した 100 枚は外れた
     r.close()
-    print(f"500 pages sharing Resources (~20MB), 100 deleted, save: {elapsed:.3f}s")
-    assert elapsed < 10.0
+    print(f"500 pages sharing Resources (~20MB), 100 deleted, save: {elapsed:.3f}s, "
+          f"next save after a rotation: {again:.3f}s")
+    assert elapsed < 10.0 and again < elapsed
 
 
 @pytest.mark.perf
