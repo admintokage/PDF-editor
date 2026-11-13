@@ -22,14 +22,42 @@ def ask_password(parent, kind: Literal["user", "owner"]) -> str | None:
     prompt = messages.PASSWORD_PROMPT_USER if kind == "user" else messages.PASSWORD_PROMPT_OWNER
     if getattr(parent, "password_retry", False):
         prompt = f"{messages.PASSWORD_WRONG}\n\n{prompt}"
-    text, ok = QInputDialog.getText(
-        parent, messages.PASSWORD_TITLE, prompt, QLineEdit.EchoMode.Password
-    )
-    return text if ok else None
+    dialog = password_dialog(parent, prompt)
+    try:
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return None
+        return dialog.textValue()
+    finally:
+        dialog.deleteLater()
+
+
+def password_dialog(parent, prompt: str) -> QInputDialog:
+    """パスワード入力欄。ボタンの文言は日本語で明示する。"""
+    dialog = QInputDialog(parent)
+    dialog.setWindowTitle(messages.PASSWORD_TITLE)
+    dialog.setLabelText(prompt)
+    dialog.setTextEchoMode(QLineEdit.EchoMode.Password)
+    dialog.setOkButtonText(messages.BUTTON_OK)
+    dialog.setCancelButtonText(messages.BUTTON_CANCEL)
+    return dialog
+
+
+def message_box(parent, icon: QMessageBox.Icon, title: str, text: str) -> QMessageBox:
+    """OK ボタン 1 つのお知らせ。ボタンの文言は日本語で明示する。"""
+    box = QMessageBox(icon, title, text, parent=parent)
+    box.setDefaultButton(box.addButton(messages.BUTTON_OK, QMessageBox.ButtonRole.AcceptRole))
+    return box
+
+
+def _show(box: QMessageBox) -> None:
+    try:
+        box.exec()
+    finally:
+        box.deleteLater()
 
 
 def show_error(parent, err: PdfEditorError) -> None:
-    QMessageBox.warning(parent, messages.ERROR_TITLE, err.user_message)
+    _show(message_box(parent, QMessageBox.Icon.Warning, messages.ERROR_TITLE, err.user_message))
 
 
 def ask_unsaved(parent, name: str) -> Literal["save", "discard", "cancel"]:
@@ -70,7 +98,7 @@ def show_save_error(parent, err: SaveFailedError) -> Literal["save_as", "cancel"
 
 
 def show_info(parent, text: str) -> None:
-    QMessageBox.information(parent, messages.INFO_TITLE, text)
+    _show(message_box(parent, QMessageBox.Icon.Information, messages.INFO_TITLE, text))
 
 
 class BlankPageDialog(QDialog):

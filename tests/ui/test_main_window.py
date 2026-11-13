@@ -44,6 +44,56 @@ def test_password_prompt_retries_until_success(qtbot, user_pw_pdf, monkeypatch):
     assert w.password_retry is False
 
 
+@pytest.fixture
+def user_and_owner_restricted_pdf(tmp_path):
+    """開くパスワード "user" と、編集を制限する権限パスワード "owner" の両方がある。"""
+    import pymupdf
+    doc = pymupdf.open(); doc.new_page()
+    path = tmp_path / "both.pdf"
+    doc.save(path, encryption=pymupdf.PDF_ENCRYPT_AES_256, user_pw="user", owner_pw="owner",
+             permissions=pymupdf.PDF_PERM_PRINT | pymupdf.PDF_PERM_ACCESSIBILITY)
+    doc.close()
+    return path
+
+
+def test_owner_prompt_after_correct_user_password_does_not_say_wrong(
+        qtbot, user_and_owner_restricted_pdf, monkeypatch):
+    asked = []
+    answers = iter(["user", "bad", "owner"])
+    monkeypatch.setattr("pdfeditor.ui.dialogs.ask_password",
+                        lambda p, k: asked.append((k, p.password_retry)) or next(answers))
+    w = MainWindow(); qtbot.addWidget(w)
+    assert w.open_path(user_and_owner_restricted_pdf) and w.doc is not None
+    assert asked == [("user", False), ("owner", False), ("owner", True)]
+
+
+def test_failure_while_showing_document_closes_it_and_keeps_window_usable(
+        qtbot, simple_pdf, mixed_size_pdf, monkeypatch):
+    from pdfeditor.core.document import PdfDocument
+    shown, closed = [], []
+    monkeypatch.setattr("pdfeditor.ui.dialogs.show_error", lambda p, e: shown.append(e))
+    real_size, real_close = PdfDocument.page_size, PdfDocument.close
+    monkeypatch.setattr(PdfDocument, "page_size",
+                        lambda self, i: (_ for _ in ()).throw(RuntimeError("code=7")))
+    monkeypatch.setattr(PdfDocument, "close", lambda self: (closed.append(1), real_close(self)))
+    w = MainWindow(); qtbot.addWidget(w); w.show()
+    assert w.open_path(simple_pdf) is False
+    assert w.doc is None and w.render_service is None and closed
+    assert len(shown) == 1 and "「simple.pdf」を表示できません" in shown[0].user_message
+    assert not w.save_action.isEnabled() and not w.zoom_in_action.isEnabled()
+    monkeypatch.setattr(PdfDocument, "page_size", real_size)
+    assert w.open_path(mixed_size_pdf) and w.doc.page_count == 3  # そのまま次を開ける
+
+
+def test_relative_path_and_absolute_path_are_the_same_window(qtbot, simple_pdf, tmp_path, monkeypatch):
+    monkeypatch.chdir(simple_pdf.parent)
+    w = MainWindow(); qtbot.addWidget(w)
+    assert w.open_path(simple_pdf.__class__(simple_pdf.name))
+    monkeypatch.chdir(tmp_path.parent)
+    assert w.doc.path == simple_pdf.resolve()
+    assert w.open_path(simple_pdf) is True and len(MainWindow.instances) == 1
+
+
 def test_password_cancel_leaves_window_empty(qtbot, user_pw_pdf, monkeypatch):
     monkeypatch.setattr("pdfeditor.ui.dialogs.ask_password", lambda p, k: None)
     w = MainWindow(); qtbot.addWidget(w)

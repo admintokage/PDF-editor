@@ -265,32 +265,53 @@ class MainWindow(QMainWindow):
         doc = self._open_with_prompts(path)
         if doc is None:
             return False
-        self._attach(doc)
-        return True
+        return self._attach(doc)
 
     def _open_with_prompts(self, path: Path) -> PdfDocument | None:
         """パスワードが要る間は尋ね直す。キャンセルとエラーは None。"""
         password: str | None = None
+        asked: str | None = None  # 直前に尋ねたパスワードの種類
         self.password_retry = False
         try:
             while True:
                 try:
                     return PdfDocument.open(path, password)
-                except (PasswordRequiredError, WrongPasswordError):
+                except PasswordRequiredError:
                     kind = "user"
+                except WrongPasswordError:
+                    kind = asked or "user"  # 権限パスワードが違った時は、権限パスワードを尋ね直す
                 except OwnerPasswordRequiredError:
                     kind = "owner"
                 except PdfEditorError as err:
                     dialogs.show_error(self, err)
                     return None
-                self.password_retry = password is not None  # 2回目以降は「違う」を添える
+                # 同じ種類を尋ね直す時だけ「違う」を添える。開くパスワードが合っていて、
+                # 次に権限パスワードを尋ねる時は添えない
+                self.password_retry = asked == kind
+                asked = kind
                 password = dialogs.ask_password(self, kind)
                 if password is None:
                     return None
         finally:
             self.password_retry = False
 
-    def _attach(self, doc: PdfDocument) -> None:
+    def _attach(self, doc: PdfDocument) -> bool:
+        """開いた文書を表示する。表示の準備で失敗したら（壊れたページなど）文書を閉じて知らせ、
+        ウィンドウは空のまま使える状態に戻す。"""
+        try:
+            self._show_document(doc)
+        except Exception:  # noqa: BLE001 - どんな失敗でもアプリは落とさない
+            log.exception("could not show the opened document")
+            self._release_document()
+            name = doc.path.name if doc.path else messages.APP_NAME
+            dialogs.show_error(self, NotAPdfError(messages.OPEN_SHOW_FAILED.format(name=name)))
+            return False
+        self.document_loaded.emit()
+        if doc.is_signed:
+            dialogs.show_info(self, messages.SIGNED_NOTICE)
+        return True
+
+    def _show_document(self, doc: PdfDocument) -> None:
         self.doc = doc
         self.undo_stack.clear()
         self.render_service = RenderService(doc, parent=self)
@@ -300,15 +321,31 @@ class MainWindow(QMainWindow):
         self.thumbnails.show_page(self.page_view.current_page())
         self._central.setCurrentWidget(self.page_view)
         self.page_view.setFocus()
-        for action in self._view_actions():
-            action.setEnabled(True)
-        self.save_action.setEnabled(True)
-        self.save_as_action.setEnabled(True)
-        self._update_page_actions()
+        self._set_document_actions(True)
         self._update_title()
-        self.document_loaded.emit()
-        if doc.is_signed:
-            dialogs.show_info(self, messages.SIGNED_NOTICE)
+
+    def _set_document_actions(self, enabled: bool) -> None:
+        for action in self._view_actions():
+            action.setEnabled(enabled)
+        self.save_action.setEnabled(enabled)
+        self.save_as_action.setEnabled(enabled)
+        self._update_page_actions()
+
+    def _release_document(self) -> None:
+        """表示から外し、描画スレッドを止めてから文書を閉じる（RenderService の約束）。"""
+        doc, service = self.doc, self.render_service
+        self.doc = None
+        self.render_service = None
+        self.page_view.set_document(None, None)
+        self.thumbnails.set_document(None, None, None)
+        if service is not None:
+            service.shutdown()
+        if doc is not None:
+            doc.close()
+        self.undo_stack.clear()
+        self._central.setCurrentWidget(self._placeholder)
+        self._set_document_actions(False)
+        self._update_title()
 
     def _on_document_changed(self) -> None:
         """文書は既に変わっている。古い画像を捨ててから並びを読み直す。"""
