@@ -13,7 +13,7 @@ from PySide6.QtWidgets import (
 )
 
 from pdfeditor.core.document import PAGE_SIZES
-from pdfeditor.core.errors import PdfEditorError
+from pdfeditor.core.errors import PdfEditorError, SaveFailedError
 from pdfeditor.ui import messages
 
 
@@ -30,6 +30,43 @@ def ask_password(parent, kind: Literal["user", "owner"]) -> str | None:
 
 def show_error(parent, err: PdfEditorError) -> None:
     QMessageBox.warning(parent, messages.ERROR_TITLE, err.user_message)
+
+
+def ask_unsaved(parent, name: str) -> Literal["save", "discard", "cancel"]:
+    """閉じる前に、未保存の変更をどうするか尋ねる。"""
+    box = QMessageBox(QMessageBox.Icon.Warning, messages.UNSAVED_TITLE,
+                      messages.UNSAVED_TEXT.format(name=name), parent=parent)
+    save = box.addButton(messages.BUTTON_SAVE, QMessageBox.ButtonRole.AcceptRole)
+    discard = box.addButton(messages.BUTTON_DISCARD, QMessageBox.ButtonRole.DestructiveRole)
+    cancel = box.addButton(messages.BUTTON_CANCEL, QMessageBox.ButtonRole.RejectRole)
+    box.setDefaultButton(save)
+    box.setEscapeButton(cancel)
+    try:
+        box.exec()
+        clicked = box.clickedButton()
+    finally:
+        box.deleteLater()
+    if clicked is save:
+        return "save"
+    if clicked is discard:
+        return "discard"
+    return "cancel"
+
+
+def show_save_error(parent, err: SaveFailedError) -> Literal["save_as", "cancel"]:
+    """保存失敗を知らせ、別の場所に保存するか尋ねる。"""
+    box = QMessageBox(QMessageBox.Icon.Warning, messages.ERROR_TITLE, err.user_message,
+                      parent=parent)
+    elsewhere = box.addButton(messages.BUTTON_SAVE_ELSEWHERE, QMessageBox.ButtonRole.AcceptRole)
+    cancel = box.addButton(messages.BUTTON_CANCEL, QMessageBox.ButtonRole.RejectRole)
+    box.setDefaultButton(elsewhere)
+    box.setEscapeButton(cancel)
+    try:
+        box.exec()
+        clicked = box.clickedButton()
+    finally:
+        box.deleteLater()
+    return "save_as" if clicked is elsewhere else "cancel"
 
 
 def show_info(parent, text: str) -> None:

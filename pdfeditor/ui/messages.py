@@ -51,6 +51,16 @@ PASSWORD_PROMPT_USER = "この PDF を開くにはパスワードが必要です
 PASSWORD_PROMPT_OWNER = "この PDF は編集が制限されています。権限パスワードを入力してください。"
 PASSWORD_WRONG = "パスワードが違います。もう一度入力してください。"
 
+# 保存
+SAVE_DIALOG_TITLE = "名前を付けて保存"
+SAVING_TEXT = "保存しています…"
+SAVE_UNEXPECTED = "保存できませんでした。予期しないエラーが発生しました。"
+UNSAVED_TITLE = "変更の保存"
+UNSAVED_TEXT = "「{name}」への変更を保存しますか？"
+BUTTON_SAVE = "保存"
+BUTTON_DISCARD = "保存しない"
+BUTTON_SAVE_ELSEWHERE = "別の場所に保存"
+
 # エラー
 ERROR_TITLE = "エラー"
 INFO_TITLE = "お知らせ"

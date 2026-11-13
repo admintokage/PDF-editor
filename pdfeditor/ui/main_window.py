@@ -1,9 +1,18 @@
 """メインウィンドウ。文書の開く流れ・メニュー・ドロップを受け持つ。"""
+import logging
+import os
 from pathlib import Path
 
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import QEventLoop, QObject, QRunnable, Qt, QThreadPool, QTimer, Signal
 from PySide6.QtGui import QAction, QKeySequence
-from PySide6.QtWidgets import QDockWidget, QFileDialog, QLabel, QMainWindow, QStackedWidget
+from PySide6.QtWidgets import (
+    QDockWidget,
+    QFileDialog,
+    QLabel,
+    QMainWindow,
+    QProgressDialog,
+    QStackedWidget,
+)
 
 from pdfeditor.core.document import PdfDocument
 from pdfeditor.core.errors import (
@@ -11,6 +20,7 @@ from pdfeditor.core.errors import (
     OwnerPasswordRequiredError,
     PasswordRequiredError,
     PdfEditorError,
+    SaveFailedError,
     WrongPasswordError,
 )
 from pdfeditor.ui import dialogs, messages
@@ -34,6 +44,34 @@ def _same_file(a: Path, b: Path) -> bool:
         return a == b
 
 
+log = logging.getLogger(__name__)
+
+PROGRESS_DELAY_MS = 1000  # 保存がこれより長引いたら進行表示を出す
+
+
+class _SaveSignals(QObject):
+    done = Signal(object)  # None（成功）か SaveFailedError
+
+
+class _SaveTask(QRunnable):
+    """別スレッドで doc.save だけを行う。Qt のウィジェットには触れない。"""
+
+    def __init__(self, doc: PdfDocument, target: Path | None, signals: _SaveSignals):
+        super().__init__()
+        self._doc, self._target, self._signals = doc, target, signals
+
+    def run(self) -> None:
+        result: SaveFailedError | None = None
+        try:
+            self._doc.save(self._target)
+        except SaveFailedError as err:
+            result = err
+        except Exception:  # 想定外でもアプリを落とさず、編集内容は残す
+            log.exception("unexpected error while saving")
+            result = SaveFailedError(messages.SAVE_UNEXPECTED, "other")
+        self._signals.done.emit(result)
+
+
 class MainWindow(QMainWindow):
     instances: list["MainWindow"] = []
 
@@ -45,6 +83,9 @@ class MainWindow(QMainWindow):
         self.doc: PdfDocument | None = None
         self.render_service: RenderService | None = None  # 文書を開いた時に作る
         self.password_retry = False  # dialogs.ask_password が「違う」の注記に使う
+        self._saving = False
+        self._save_result: SaveFailedError | None = None
+        self._save_loop: QEventLoop | None = None
         self.undo_stack = make_undo_stack(self)
         self.setAcceptDrops(True)
         self.resize(1000, 750)
@@ -89,14 +130,15 @@ class MainWindow(QMainWindow):
         self.open_action.triggered.connect(self._choose_and_open)
         file_menu.addAction(self.open_action)
 
-        # 保存は Task 11 が接続する
         self.save_action = QAction(messages.ACTION_SAVE, self)
         self.save_action.setShortcut(QKeySequence("Ctrl+S"))
-        self.save_action.setEnabled(False)
+        self.save_action.setEnabled(False)  # 文書を開くまでは使えない
+        self.save_action.triggered.connect(lambda: self.save())
         file_menu.addAction(self.save_action)
         self.save_as_action = QAction(messages.ACTION_SAVE_AS, self)
         self.save_as_action.setShortcut(QKeySequence("Ctrl+Shift+S"))
         self.save_as_action.setEnabled(False)
+        self.save_as_action.triggered.connect(lambda: self.save_as())
         file_menu.addAction(self.save_as_action)
 
         file_menu.addSeparator()
@@ -173,7 +215,7 @@ class MainWindow(QMainWindow):
 
     def _update_page_actions(self) -> None:
         """文書があれば追加・挿入、さらに選択があれば削除・回転を使える。"""
-        has_doc = self.doc is not None
+        has_doc = self.doc is not None and not self._saving
         has_selection = has_doc and bool(self.thumbnails.selected_pages())
         self.insert_blank_action.setEnabled(has_doc)
         self.insert_pdf_action.setEnabled(has_doc)
@@ -202,6 +244,8 @@ class MainWindow(QMainWindow):
         return None
 
     def open_path(self, path: Path) -> bool:
+        if self._saving:
+            return False
         existing = self._window_showing(path)
         if existing is not None:
             existing.show()
@@ -255,6 +299,8 @@ class MainWindow(QMainWindow):
         self.page_view.setFocus()
         for action in self._view_actions():
             action.setEnabled(True)
+        self.save_action.setEnabled(True)
+        self.save_as_action.setEnabled(True)
         self._update_page_actions()
         self._update_title()
         self.document_loaded.emit()
@@ -356,6 +402,100 @@ class MainWindow(QMainWindow):
             return
         self._run(RotatePagesCommand(self.doc, selected, delta, self.document_changed.emit))
 
+    # --- 保存 -------------------------------------------------------------
+    def save(self) -> bool:
+        """上書き保存。保存先がまだない（または親フォルダがない）ときは名前を付けて保存。"""
+        if self._saving or self.doc is None:
+            return False
+        path = self.doc.path
+        if path is None or not (path.parent.is_dir() and os.access(path.parent, os.W_OK)):
+            return self.save_as()
+        return self._save_to(None)
+
+    def save_as(self) -> bool:
+        if self._saving or self.doc is None:
+            return False
+        target = self._ask_save_path()
+        return target is not None and self._save_to(target)
+
+    def _ask_save_path(self) -> Path | None:
+        path = self.doc.path
+        name, _ = QFileDialog.getSaveFileName(
+            self, messages.SAVE_DIALOG_TITLE, str(path) if path else "",
+            messages.OPEN_DIALOG_FILTER)
+        if not name:
+            return None
+        target = Path(name)
+        if target.suffix.lower() != ".pdf":
+            target = target.with_name(target.name + ".pdf")
+        return target
+
+    def _save_to(self, target: Path | None) -> bool:
+        """成功するか、利用者がやめるまで続ける。成功した時だけ True。"""
+        while True:
+            err = self._save_in_background(target)
+            if err is None:
+                self.undo_stack.setClean()
+                self._update_title()
+                return True
+            if dialogs.show_save_error(self, err) != "save_as":
+                return False
+            target = self._ask_save_path()
+            if target is None:
+                return False
+
+    def _save_in_background(self, target: Path | None) -> SaveFailedError | None:
+        """doc.save を別スレッドで走らせ、終わるまでイベントを回して待つ。"""
+        self._set_saving(True)
+        loop = QEventLoop(self)
+        self._save_loop = loop
+        self._save_result = None
+        progress: QProgressDialog | None = None
+
+        def show_progress() -> None:
+            nonlocal progress
+            progress = QProgressDialog(messages.SAVING_TEXT, "", 0, 0, self)
+            progress.setCancelButton(None)  # 中断できない
+            progress.setWindowModality(Qt.WindowModality.WindowModal)
+            progress.setMinimumDuration(0)
+            progress.show()
+
+        timer = QTimer(self)
+        timer.setSingleShot(True)
+        timer.timeout.connect(show_progress)
+        signals = _SaveSignals()
+        signals.done.connect(self._on_save_done, Qt.ConnectionType.QueuedConnection)
+        try:
+            timer.start(PROGRESS_DELAY_MS)
+            QThreadPool.globalInstance().start(_SaveTask(self.doc, target, signals))
+            loop.exec()
+        finally:
+            timer.stop()
+            timer.deleteLater()
+            if progress is not None:
+                progress.close()
+                progress.deleteLater()
+            self._save_loop = None
+            self._set_saving(False)
+        return self._save_result
+
+    def _on_save_done(self, result) -> None:
+        self._save_result = result
+        if self._save_loop is not None:
+            self._save_loop.quit()
+
+    def _set_saving(self, saving: bool) -> None:
+        """保存中はファイルを開く・保存・ページ操作・元に戻すを受け付けない。"""
+        self._saving = saving
+        has_doc = self.doc is not None
+        self.open_action.setEnabled(not saving)
+        self.save_action.setEnabled(has_doc and not saving)
+        self.save_as_action.setEnabled(has_doc and not saving)
+        self.undo_action.setEnabled(not saving and self.undo_stack.canUndo())
+        self.redo_action.setEnabled(not saving and self.undo_stack.canRedo())
+        self.thumbnails.setEnabled(not saving)  # 並べ替えのドラッグも止める
+        self._update_page_actions()
+
     # --- ドロップ ---------------------------------------------------------
     @staticmethod
     def _pdf_paths(mime) -> list[Path]:
@@ -379,6 +519,15 @@ class MainWindow(QMainWindow):
 
     # --- 終了 -------------------------------------------------------------
     def closeEvent(self, event) -> None:
+        if self._saving:  # 保存の最中は閉じない
+            event.ignore()
+            return
+        if self.doc is not None and not self.undo_stack.isClean():
+            name = self.doc.path.name if self.doc.path else messages.APP_NAME
+            answer = dialogs.ask_unsaved(self, name)
+            if answer == "cancel" or (answer == "save" and not self.save()):
+                event.ignore()
+                return
         if self in MainWindow.instances:
             MainWindow.instances.remove(self)
         self.page_view.set_document(None, None)
