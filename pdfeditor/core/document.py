@@ -24,6 +24,18 @@ class _Snapshot:
     data: bytes
     detached_pages: frozenset[int]       # このセッションで外していて、まだ戻していないページ
     untargeted_outline: frozenset[int]   # 削除で行き先を外したしおりの項目
+    originals: dict[int, str]            # 削除で PyMuPDF が書き換えたオブジェクトの、削除前の形
+
+
+
+def _originals(detached: list[DetachedPages]) -> dict[int, str]:
+    """外しているページの控えにある「削除前の形」を、古い削除のものを優先して重ねる。"""
+    out: dict[int, str] = {}
+    for d in detached:
+        for x, text in d.changed_objects.items():
+            out.setdefault(x, text)
+    return out
+
 
 PAGE_SIZES: dict[str, tuple[float, float]] = {
     "A4 縦": (595, 842), "A4 横": (842, 595),
@@ -420,6 +432,7 @@ class PdfDocument:
             self.fitz.tobytes(encryption=pymupdf.PDF_ENCRYPT_KEEP),
             frozenset(x for d in self._detached for x in d.page_xrefs),
             frozenset(x for d in self._detached for x in d.untargeted_outline),
+            _originals(self._detached),
         )
 
     def to_bytes(self, snapshot: _Snapshot | None = None) -> bytes:
@@ -441,8 +454,9 @@ class PdfDocument:
             if copy.needs_pass:
                 copy.authenticate(self._password or "")
             try:
+                revived = page_detach.revive_chained_actions(copy, snapshot.originals)                     if snapshot.detached_pages else set()
                 scrub.scrub_detached_pages(copy, snapshot.detached_pages,
-                                           snapshot.untargeted_outline, self._prune_memo)
+                                           snapshot.untargeted_outline - revived, self._prune_memo)
             except Exception as exc:  # noqa: BLE001 - 取り除けたと言えなければ保存しない
                 log.exception("scrubbing deleted pages failed; save refused")
                 raise errors.SaveFailedError(_SCRUB_FAILED, "verify_failed") from exc

@@ -724,3 +724,65 @@ def test_dead_goto_is_spliced_out_of_action_chains(tmp_path, encrypt):
         [("JavaScript", "open")]
     r.close()
     assert warnings_after_full_load(out, encrypt) == ""
+
+
+# ---------------------------------------------------------------------------
+# S4 の続き: PyMuPDF が削除のときに外す、しおりの項目とリンク注釈の「GoTo → /Next」も継ぐ
+
+def _chain_file(tmp_path, encrypt):
+    doc = _base(3)
+    p0, p1, p2 = (doc[i].xref for i in range(3))
+    link = _obj(doc, f"<</Type/Annot/Subtype/Link/Rect[0 0 20 20]/Border[0 0 0]/P {p0} 0 R"
+                     f"/A<</S/GoTo/D[{p1} 0 R/Fit]/Next<</S/URI/URI(https://next.example)>>>>>>")
+    act = _obj(doc, f"<</S/GoTo/D[{p1} 0 R/Fit]/Next<</S/GoTo/D[{p2} 0 R/Fit]>>>>")
+    link2 = _obj(doc, f"<</Type/Annot/Subtype/Link/Rect[30 0 50 20]/Border[0 0 0]/P {p0} 0 R/A {act} 0 R>>")
+    plain = _obj(doc, f"<</Type/Annot/Subtype/Link/Rect[60 0 80 20]/Border[0 0 0]/P {p0} 0 R"
+                      f"/A<</S/GoTo/D[{p1} 0 R/Fit]>>>>")
+    doc.xref_set_key(p0, "Annots", f"[{link} 0 R {plain} 0 R {link2} 0 R]")
+    ol = doc.get_new_xref()
+    it1, it2 = doc.get_new_xref(), doc.get_new_xref()
+    doc.update_object(it1, f"<</Title(Chain item)/Parent {ol} 0 R/Next {it2} 0 R"
+                           f"/A<</S/GoTo/D[{p1} 0 R/Fit]/Next<</S/GoTo/D[{p2} 0 R/Fit]>>>>>>")
+    doc.update_object(it2, f"<</Title(Kept item)/Parent {ol} 0 R/Prev {it1} 0 R/Dest[{p0} 0 R/Fit]>>")
+    doc.update_object(ol, f"<</Type/Outlines/First {it1} 0 R/Last {it2} 0 R/Count 2>>")
+    doc.xref_set_key(doc.pdf_catalog(), "Outlines", f"{ol} 0 R")
+    return _save(doc, tmp_path / "chain.pdf", encrypt)
+
+
+def _outline_actions(d) -> list:
+    pdf = pymupdf._as_pdf_document(d)
+    out = []
+    for x in d.get_outline_xrefs():
+        item = mupdf.pdf_load_object(pdf, x)
+        out.append((mupdf.pdf_to_text_string(mupdf.pdf_dict_gets(item, "Title")),
+                    _chain(mupdf.pdf_dict_gets(item, "A")), d.xref_get_key(x, "C")[0]))
+    return out
+
+
+@ENCRYPT
+def test_outline_item_and_link_keep_their_next_actions(tmp_path, encrypt):
+    src = _chain_file(tmp_path, encrypt)
+    before = _summary(src, encrypt)
+    d = PdfDocument.open(src, PW if encrypt else None)
+    detached = d.delete_pages([1])
+    out = tmp_path / "out.pdf"
+    d.save(out)
+    assert _gotos_without_d(out, encrypt) == []
+    r = _open(out, encrypt)
+    assert _outline_actions(r) == [("Chain item", [("GoTo", "")], "null"), ("Kept item", [], "null")]
+    assert [t[1:3] for t in r.get_toc()] == [["Chain item", 2], ["Kept item", 1]]
+    pdf = pymupdf._as_pdf_document(r)
+    chains = [_chain(mupdf.pdf_dict_gets(mupdf.pdf_load_object(pdf, x), "A"))
+              for x, _, _ in r[0].annot_xrefs()]
+    assert chains == [[("URI", "https://next.example")], [("GoTo", "")]]  # 続きのないリンクは消える
+    assert [(l["kind"], l.get("uri"), l.get("page")) for l in r[0].get_links()] == \
+        [(pymupdf.LINK_URI, "https://next.example", None), (pymupdf.LINK_GOTO, None, 1)]
+    r.close()
+    assert warnings_after_full_load(out, encrypt) == ""
+    d.restore_pages(detached)  # 元に戻せば、すべて削除前のまま
+    d.save(tmp_path / "back.pdf")
+    d.close()
+    assert _summary(tmp_path / "back.pdf", encrypt) == before
+    back = _open(tmp_path / "back.pdf", encrypt)
+    assert _outline_actions(back)[0] == ("Chain item", [("GoTo", ""), ("GoTo", "")], "null")
+    back.close()

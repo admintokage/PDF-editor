@@ -132,6 +132,80 @@ def restore_objects(doc: pymupdf.Document, saved: dict[int, str]) -> None:
         doc.update_object(xref, text)
 
 
+def _chained_goto(action) -> bool:
+    """action が、/Next に続くアクションのある GoTo か。"""
+    return (mupdf.pdf_is_dict(action) and mupdf.pdf_to_name(mupdf.pdf_dict_gets(action, "S")) == "GoTo"
+            and not mupdf.pdf_is_null(mupdf.pdf_dict_gets(action, "Next")))
+
+
+def _items(obj) -> list:
+    if mupdf.pdf_is_array(obj):
+        return [mupdf.pdf_array_get(obj, i) for i in range(mupdf.pdf_array_len(obj))]
+    return []
+
+
+def revive_chained_actions(copy: pymupdf.Document, originals: dict[int, str]) -> set[int]:
+    """保存の写し copy で、ページ削除のときに PyMuPDF が外した「削除ページへの GoTo に /Next が
+    続く」アクションを元に戻す（そのあと掃除で、GoTo を外して /Next を継がせる）。
+      - しおりの項目: /A（と色 /C）を削除前の形に戻す
+      - リンク注釈: 残るページの /Annots から外されたものを、元の位置に戻す
+    originals は削除前のオブジェクトの文字表現（DetachedPages.changed_objects を古い順に重ねた
+    もの）。戻したしおりの項目の xref を返す。生きている文書には使わない。"""
+    pdf = _pdf(copy)
+    parsed: dict[int, object] = {}
+    scratch: list[int] = []
+
+    def original(x: int):
+        if x not in parsed:
+            tmp = copy.get_new_xref()  # 文字表現を写しの中で読む（参照の番号は写しと同じ）
+            copy.update_object(tmp, originals[x])
+            scratch.append(tmp)
+            parsed[x] = mupdf.pdf_load_object(pdf, tmp)
+        return parsed[x]
+
+    revived: set[int] = set()
+    for x in list(originals):
+        old, cur = original(x), mupdf.pdf_load_object(pdf, x)
+        if not mupdf.pdf_is_dict(old) or not mupdf.pdf_is_dict(cur):
+            continue
+        if not mupdf.pdf_is_null(mupdf.pdf_dict_gets(old, "Title")):  # しおりの項目
+            action = mupdf.pdf_dict_gets(old, "A")
+            if _chained_goto(action) and mupdf.pdf_is_null(mupdf.pdf_dict_gets(cur, "A")):
+                mupdf.pdf_dict_puts(cur, "A", mupdf.pdf_deep_copy_obj(
+                    mupdf.pdf_dict_get(old, mupdf.pdf_new_name("A"))))
+                color = mupdf.pdf_dict_gets(old, "C")
+                if mupdf.pdf_is_null(color):
+                    mupdf.pdf_dict_dels(cur, "C")
+                else:
+                    mupdf.pdf_dict_puts(cur, "C", mupdf.pdf_deep_copy_obj(color))
+                revived.add(x)
+        elif mupdf.pdf_to_name(mupdf.pdf_dict_gets(old, "Type")) == "Page":
+            annots = mupdf.pdf_dict_get(old, mupdf.pdf_new_name("Annots"))
+            if mupdf.pdf_is_indirect(annots) and mupdf.pdf_to_num(annots) in originals:
+                annots = original(mupdf.pdf_to_num(annots))
+            current = mupdf.pdf_dict_gets(cur, "Annots")
+            now = {mupdf.pdf_to_num(a) for a in _items(current)}
+            back = {mupdf.pdf_to_num(a) for a in _items(annots)
+                    if mupdf.pdf_to_num(a) not in now
+                    and mupdf.pdf_to_name(mupdf.pdf_dict_gets(a, "Subtype")) == "Link"
+                    and _chained_goto(mupdf.pdf_dict_gets(a, "A"))}
+            if not back:
+                continue
+            order = [mupdf.pdf_to_num(a) for a in _items(annots)
+                     if mupdf.pdf_to_num(a) in now | back]
+            order += [n for n in (mupdf.pdf_to_num(a) for a in _items(current)) if n not in order]
+            if not mupdf.pdf_is_array(current):
+                current = mupdf.pdf_new_array(pdf, len(order))
+                mupdf.pdf_dict_puts(cur, "Annots", current)
+            while mupdf.pdf_array_len(current):
+                mupdf.pdf_array_delete(current, 0)
+            for n in order:
+                mupdf.pdf_array_push(current, mupdf.pdf_new_indirect(pdf, n, 0))
+    for tmp in scratch:  # 読むためだけのオブジェクトは空にする（保存の掃除で落ちる）
+        copy.update_object(tmp, "null")
+    return revived
+
+
 PageLabels = tuple[str, dict[int, str]] | None  # (カタログの値, 中の間接オブジェクト) / なし
 
 
