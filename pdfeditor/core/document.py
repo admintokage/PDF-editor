@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pymupdf
 
-from pdfeditor.core import errors, page_detach, safe_save, scrub
+from pdfeditor.core import errors, page_detach, resource_prune, safe_save, scrub
 from pdfeditor.core.page_detach import DetachedPages
 
 log = logging.getLogger(__name__)
@@ -347,26 +347,38 @@ class PdfDocument:
         ではなく、その写しから 1 回で取り込む。写しは lock の中でバイト列にし、残りは lock の外で
         行う。写しからは指定していないページを、ページ削除と同じくフォーム部品を AcroForm から
         外してから取り除く（ほかのページの部品と親を共有する部品から、取り除いたページへ
-        たどらないように）。受け継がれた MediaBox・Rotate・Resources は insert_pdf がページに
-        書き写す。範囲外は IndexError、空・重複は ValueError。"""
+        たどらないように）。ページが Resources を共有している（または /Pages から受け継いでいる）と、
+        選ばなかったページの画像・フォントなども載っているので、選んだページが使わない項目を外す
+        （resource_prune。見た目が変わればやめる）。受け継がれた MediaBox・Rotate・Resources は
+        insert_pdf がページに書き写す。範囲外は IndexError、空・重複は ValueError。"""
         with self.lock:
             self._check_indices(indices)
             if not indices:
                 raise ValueError("ページが指定されていません。")
             try:
-                data = self.fitz.tobytes(encryption=pymupdf.PDF_ENCRYPT_NONE)
+                # 暗号は元のまま書く。暗号化なし（PDF_ENCRYPT_NONE）で書くと、生きている文書の
+                # 暗号の状態が変わり、その後の保存で中身の読めないファイルができる（実測）
+                data = self.fitz.tobytes(encryption=pymupdf.PDF_ENCRYPT_KEEP)
             except Exception as exc:  # noqa: BLE001
                 raise errors.PageOperationError(_EXPORT_FAILED) from exc
+            password = self._password
+            detached = {x for d in self._detached for x in d.page_xrefs}  # 削除して控えているページ
         keep = set(indices)
         src = out = None
         try:
             src = pymupdf.open(stream=data, filetype="pdf")
+            if src.needs_pass:
+                src.authenticate(password or "")
             others = [i for i in range(src.page_count) if i not in keep]
             if others:
                 widgets = [xref for i in others for xref, kind, _ in src[i].annot_xrefs()
                            if kind == pymupdf.PDF_ANNOT_WIDGET]
+                removed = {src[i].xref for i in others} | detached
                 page_detach.remove_form_fields(src, widgets, [])
                 src.delete_pages(others)
+                # 選んだページの（共有・受け継いだ）Resources から、選んだページが使わない資源を
+                # 外す。見た目が変わればやめる（resource_prune）
+                resource_prune.prune_unused_resources(src, None, removed)
             out = pymupdf.open()
             out.insert_pdf(src)
             return out.tobytes(garbage=3, deflate=True)

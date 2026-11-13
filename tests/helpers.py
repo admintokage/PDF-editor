@@ -327,3 +327,35 @@ def page_texts(path_or_bytes) -> list[str]:
     out = [p.get_text() for p in d]
     d.close()
     return out
+
+
+def make_shared_big(path: Path, pages: int = 500, side: int = 120) -> Path:
+    """pages ページ（500 で約 20 MB）。各ページが自分の画像（乱数の画素、圧縮が効かない）と
+    40 行の文字を描き、すべてのページが 1 つの間接の Resources を参照する。"""
+    import random
+
+    import pymupdf
+
+    rnd = random.Random(4)
+    doc = pymupdf.open()
+    names = []
+    for i in range(pages):
+        page = doc.new_page()
+        pix = pymupdf.Pixmap(pymupdf.csRGB, side, side, rnd.randbytes(side * side * 3), False)
+        names.append((f"Im{i}", page.insert_image(pymupdf.Rect(0, 0, 1, 1), stream=pix.tobytes("png"))))
+    helv = doc.get_new_xref()
+    doc.update_object(helv, "<</Type/Font/Subtype/Type1/BaseFont/Helvetica/Encoding/WinAnsiEncoding>>")
+    rx = doc.get_new_xref()
+    doc.update_object(rx, "<</Font<</F0 %d 0 R>>/XObject<<%s>>>>" % (
+        helv, "".join(f"/{n} {x} 0 R" for n, x in names)))
+    for i in range(pages):
+        body = " ".join(f"(word{j} of page {i}) Tj T*" for j in range(40))
+        cx = doc.get_new_xref()
+        doc.update_object(cx, "<<>>")
+        doc.update_stream(cx, f"q 200 0 0 200 50 550 cm /Im{i} Do Q BT /F0 9 Tf 12 TL 50 500 Td "
+                              f"{body} ET".encode())
+        doc.xref_set_key(doc[i].xref, "Contents", f"{cx} 0 R")
+        doc.xref_set_key(doc[i].xref, "Resources", f"{rx} 0 R")
+    doc.save(path, garbage=3, deflate=True)
+    doc.close()
+    return path

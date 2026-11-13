@@ -8,8 +8,12 @@
 そこで保存の写しで（生きている文書は元に戻すために触らない）、アプリが外したページ
 （PdfDocument が控えているもの。テンプレートなど、もともとページツリーの外にあるページは対象外）
 について:
+  0. 残るページと共有している Resources から、残るページが使わない削除ページの資源（画像・
+     フォントなど）の項目を外す（resource_prune。見た目が変わらないことを描いて確かめる）。
+     同じページオブジェクトがページツリーにまだあれば（2 回あって 1 つだけ削除）、消さない。
   1. 消すもの: そのページ、その注釈（残るページと共有していないもの）、行き先がそのページの
-     行き先・GoTo アクション（間接オブジェクトのもの）
+     行き先・GoTo アクション（間接オブジェクトのもの）。行き先を失った名前付きの行き先の名前を
+     名前で指すもの（/Dest・GoTo の /D）も行き先を失ったものとして扱う
   2. 構造ツリー: 中身（MCID・MCR・OBJR。/Pg は親から受け継ぐ）がすべて削除ページにある要素を、
      子孫ごと消す。残るページの中身がある要素は残し、削除ページの中身の子だけ外す。
      ParentTree からは、削除ページとその注釈の組を外す。
@@ -18,7 +22,9 @@
   4. 記事のスレッド: 削除ページのビーズを外してつなぎ直す。ビーズがなくなったスレッドは消す。
   5. レイヤー: 削除ページ（とその注釈）からしか使われていない OCG を /OCProperties から外す。
   6. 消すもの以外のすべてのオブジェクトから、消すものへの参照を取り除く（辞書ならキーごと、
-     配列なら null。名前ツリー・数値ツリーでは組ごと。行き先を失った行き先・GoTo も同じ）。
+     配列なら null。名前ツリー・数値ツリーでは組ごと。行き先を失った行き先・GoTo も同じ。
+     /Next のある GoTo は、外して /Next のアクションで置き換える）。名前ツリー・数値ツリーの
+     /Limits は残った鍵から数え直し、空になった節とツリーは外す。
   7. トレーラーからたどれるオブジェクトに、消すものへの参照が残っていないことを確かめる。
 その後 garbage 付きで書けば、どこからも参照されないものは落ちる。
 7 で残っていたら UnscrubbableError を投げ、保存をやめる（中身が残ったファイルは書かない）。
@@ -32,6 +38,8 @@ from collections.abc import Iterable
 
 import pymupdf
 from pymupdf import mupdf
+
+from pdfeditor.core import resource_prune
 
 # 文字表現の中の参照らしきもの。文字列の中の文字にも当たるので、絞り込み（多めに拾う）にだけ使う。
 _REF_TEXT = re.compile(r"(?<![\w.])(\d+)\s+\d+\s+R\b")
@@ -66,10 +74,11 @@ def _is_container(obj) -> bool:
     return not mupdf.pdf_is_indirect(obj) and (mupdf.pdf_is_dict(obj) or mupdf.pdf_is_array(obj))
 
 
-def _direct_refs(obj, skip_key: str | None = None) -> list[int]:
-    """obj（の直接の中身）にある間接参照の番号。skip_key は一番外側の辞書でだけ飛ばす。"""
+def _direct_refs(obj, skip_key: str | None = None, top: bool = True) -> list[int]:
+    """obj（の直接の中身）にある間接参照の番号。skip_key は一番外側の辞書でだけ飛ばす。
+    top=False なら、obj そのものが間接参照ならその番号も入れる。"""
     out: list[int] = []
-    stack = [(obj, True)]
+    stack = [(obj, top)]
     while stack:
         o, top = stack.pop()
         if mupdf.pdf_is_indirect(o) and not top:
@@ -101,6 +110,10 @@ class _Scrub:
         self.seen_elems: set[int] = set()      # 構造ツリーで見た要素
         self.live_memo: dict[int, bool] = {}   # しおりの項目を残すか
         self.outline_seen: set[int] = set()    # しおりで組み直した項目
+        self.layer_candidates: set[int] = set()  # 削除ページから使う OCG
+        self.dead_names: set[str] = set()      # 行き先を失った名前付きの行き先の名前
+        self.spliced: set[int] = set()         # 行き先を失い /Next を継ぐ、間接オブジェクトの GoTo
+        self.dest_holders: set[int] = set()    # 名前で行き先を指しうるオブジェクト（絞り込み用）
 
     # ---- 下ごしらえ ----
 
@@ -111,9 +124,11 @@ class _Scrub:
         for i in range(mupdf.pdf_count_pages(self.pdf)):
             self.kept_pages.add(mupdf.pdf_to_num(mupdf.pdf_lookup_page_obj(self.pdf, i)))
         for x in self.pages:
-            if x in self.kept_pages or not 0 < x < self.size \
-                    or _name(_get(self.load(x), "Type")) != "Page":
+            if not 0 < x < self.size or _name(_get(self.load(x), "Type")) != "Page":
                 raise UnscrubbableError(f"object {x} is not a detached page")
+        # 同じページオブジェクトがページツリーに 2 回あり、その 1 つだけを削除した: まだ使っている
+        self.pages -= self.kept_pages
+        self.removed = set(self.pages)
 
     def read_text_refs(self) -> None:
         """各オブジェクトの文字表現にある参照らしき番号（絞り込み用）。"""
@@ -125,6 +140,8 @@ class _Scrub:
             refs = {int(m) for m in _REF_TEXT.findall(text)}
             if refs:
                 self.text_refs[x] = refs
+            if "/D" in text:
+                self.dest_holders.add(x)
 
     def candidates(self, numbers: set[int]) -> list[int]:
         """numbers のどれかを参照しているかもしれない、消すもの以外のオブジェクト。"""
@@ -140,6 +157,32 @@ class _Scrub:
                     self.removed_annots.add(_num(a))
         self.removed |= self.removed_annots
 
+    # ---- 共有された Resources ----
+
+    def note_layers(self) -> None:
+        """削除ページ（とその注釈）から使う OCG を、Resources を取り除く前に控える
+        （取り除いた後は、共有の Resources からはたどれなくなる）。"""
+        props = _get(self.load(self.catalog), "OCProperties")
+        self.layer_candidates = self.layers_used_by(self.pages | self.removed_annots)             if mupdf.pdf_is_dict(props) else set()
+
+    def resource_candidates(self) -> set[int]:
+        """削除ページの Resources（受け継いだものも含む）の各項目が参照するオブジェクト。"""
+        out: set[int] = set()
+        for x in self.pages:
+            res = mupdf.pdf_dict_get_inheritable(self.load(x), mupdf.pdf_new_name("Resources"))
+            for cat in resource_prune.CATEGORIES:
+                d = _get(res, cat)
+                if mupdf.pdf_is_dict(d):
+                    for i in range(mupdf.pdf_dict_len(d)):
+                        out.update(_direct_refs(mupdf.pdf_dict_get_val(d, i), None, top=False))
+        return out - self.kept_pages
+
+    def prune_shared_resources(self) -> None:
+        """残るページと共有している Resources から、残るページが使っていない、削除ページの
+        資源の項目を取り除く（resource_prune。見た目が変わらないことを確かめる）。"""
+        resource_prune.prune_unused_resources(self.doc, self.resource_candidates(), self.pages,
+                                              self.text_refs)
+
     # ---- 行き先 ----
 
     def dead(self, value) -> bool:
@@ -151,6 +194,22 @@ class _Scrub:
         if mupdf.pdf_is_dict(value):
             return self.dead_goto(value)
         return False
+
+    def dead_dest_value(self, dest) -> bool:
+        """行き先（/Dest や GoTo の /D の値）が、削除ページか、なくなった名前付きの行き先を指すか。"""
+        if mupdf.pdf_is_indirect(dest):
+            num = mupdf.pdf_to_num(dest)
+            if num in self.dead_dests or num in self.pages:
+                return True
+        if mupdf.pdf_is_array(dest):
+            return self.dead_dest_array(dest)
+        return self.dead_name(dest)
+
+    def dead_name(self, value) -> bool:
+        """value（文字列・名前）が、行き先を失った名前付きの行き先の名前か。"""
+        if mupdf.pdf_is_string(value):
+            return mupdf.pdf_to_text_string(value) in self.dead_names
+        return mupdf.pdf_is_name(value) and mupdf.pdf_to_name(value) in self.dead_names
 
     def dead_dest_array(self, array) -> bool:
         """[削除ページ /Fit ...] の形の行き先。"""
@@ -164,24 +223,82 @@ class _Scrub:
         s = _get(d, "S")
         if (not mupdf.pdf_is_null(s) and _name(s) != "GoTo") or not mupdf.pdf_is_null(_get(d, "Next")):
             return False
-        dest = _get(d, "D")
-        if mupdf.pdf_is_indirect(dest):
-            return mupdf.pdf_to_num(dest) in self.dead_dests
-        return mupdf.pdf_is_array(dest) and self.dead_dest_array(dest)
+        return self.dead_dest_value(_get(d, "D"))
+
+    def spliced_goto(self, d) -> bool:
+        """/D が行き先を失い、/Next に続くアクションがある GoTo（外して /Next で置き換える）。"""
+        if _num(d) in self.spliced:
+            return True
+        return (mupdf.pdf_is_dict(d) and _name(_get(d, "S")) == "GoTo"
+                and not mupdf.pdf_is_null(_get(d, "Next")) and self.dead_dest_value(_get(d, "D")))
+
+    def splice(self, value, depth: int = 0) -> list | None:
+        """value が行き先を失った GoTo で /Next があれば、その代わりに置くアクションの列
+        （/Next のうち、さらに外すもの・継ぐものを処理したもの）。そうでなければ None。"""
+        if depth > _MAX_DEPTH:
+            raise UnscrubbableError("action chain too deep")
+        if not self.spliced_goto(value):
+            return None
+        out = []
+        for item in _items(_get(value, "Next")):
+            if self.dead(item):
+                continue
+            sub = self.splice(item, depth + 1)
+            out.extend(sub if sub is not None else [item])
+        return out
+
+    def single_action(self, actions: list):
+        """アクションの列を、1 つしか置けない場所（/A・/OpenAction・/AA の項目）に置く形にする。
+        2 つ目以降は 1 つ目の /Next の後ろへつなぐ（実行の順は変わらない）。"""
+        if len(actions) == 1:
+            return actions[0]
+        first = mupdf.pdf_copy_dict(actions[0])
+        chain = mupdf.pdf_new_array(self.pdf, len(actions))
+        for item in _items(_get(first, "Next")) + actions[1:]:
+            mupdf.pdf_array_push(chain, item)
+        mupdf.pdf_dict_puts(first, "Next", chain)
+        return first
+
+    def note_dead_names(self) -> None:
+        """行き先が削除ページの、名前付きの行き先（名前ツリー /Names/Dests と古い /Dests）の名前。"""
+        root = mupdf.pdf_trailer(self.pdf)
+        stack, seen = [mupdf.pdf_dict_getp(root, "Root/Names/Dests")], set()
+        while stack:
+            node = stack.pop()
+            if not mupdf.pdf_is_dict(node) or (_num(node) and _num(node) in seen):
+                continue
+            seen.add(_num(node))
+            names = _get(node, "Names")
+            for i in range(0, mupdf.pdf_array_len(names) - 1 if mupdf.pdf_is_array(names) else 0, 2):
+                if self.dead(mupdf.pdf_array_get(names, i + 1)):
+                    self.dead_names.add(mupdf.pdf_to_text_string(mupdf.pdf_array_get(names, i)))
+            stack.extend(_items(_get(node, "Kids")))
+        old = mupdf.pdf_dict_getp(root, "Root/Dests")
+        if mupdf.pdf_is_dict(old):
+            for i in range(mupdf.pdf_dict_len(old)):
+                if self.dead(mupdf.pdf_dict_get_val(old, i)):
+                    self.dead_names.add(_name(mupdf.pdf_dict_get_key(old, i)))
 
     def mark_dead_destinations(self) -> None:
         """行き先が削除ページの、間接オブジェクトの行き先と GoTo を消すものに加える。"""
         while True:
-            found = []
-            for x in self.candidates(self.pages | self.dead_dests):
+            found, spliced = [], []
+            self.note_dead_names()
+            todo = set(self.candidates(self.pages | self.dead_dests | self.spliced))
+            if self.dead_names:
+                todo |= self.dest_holders - self.removed
+            for x in todo - self.dead_dests - self.spliced:
                 obj = self.load(x)
                 if (mupdf.pdf_is_array(obj) and self.dead_dest_array(obj)) or \
                         (mupdf.pdf_is_dict(obj) and self.dead_goto(obj)):
                     found.append(x)
-            if not found:
+                elif mupdf.pdf_is_dict(obj) and self.spliced_goto(obj):
+                    spliced.append(x)
+            if not found and not spliced:
                 return
             self.dead_dests.update(found)
             self.removed.update(found)
+            self.spliced.update(spliced)
 
     # ---- 構造ツリー ----
 
@@ -317,8 +434,8 @@ class _Scrub:
         return out
 
     def target_dead(self, item) -> bool:
-        return (_num(item) in self.untargeted_outline
-                or self.dead(_get(item, "Dest")) or self.dead(_get(item, "A")))
+        return (_num(item) in self.untargeted_outline or self.dead(_get(item, "Dest"))
+                or self.dead_name(_get(item, "Dest")) or self.dead(_get(item, "A")))
 
     def live(self, item, depth: int = 0) -> bool:
         """項目かその子孫に、削除ページ以外を指す（または行き先のない）項目があるか。"""
@@ -345,7 +462,7 @@ class _Scrub:
         for c in keep:
             if self.target_dead(c):  # 残るページを指す子孫があるので、項目は残して行き先を外す
                 for key in ("Dest", "A"):
-                    if self.dead(_get(c, key)):
+                    if self.dead(_get(c, key)) or (key == "Dest" and self.dead_name(_get(c, key))):
                         mupdf.pdf_dict_dels(c, key)
             changed |= self.rebuild_outline(c, depth + 1)
         if len(keep) != len(kids):
@@ -409,8 +526,9 @@ class _Scrub:
             return
         for i in reversed(range(mupdf.pdf_array_len(threads))):
             thread = mupdf.pdf_array_get(threads, i)
-            beads, bead = [], _get(thread, "F")
-            while mupdf.pdf_is_indirect(bead) and mupdf.pdf_to_num(bead) not in {_num(b) for b in beads}:
+            beads, seen, bead = [], set(), _get(thread, "F")
+            while mupdf.pdf_is_indirect(bead) and mupdf.pdf_to_num(bead) not in seen:
+                seen.add(mupdf.pdf_to_num(bead))
                 beads.append(bead)
                 bead = _get(bead, "N")
             keep = [b for b in beads if _num(_get(b, "P")) not in self.pages]
@@ -435,7 +553,7 @@ class _Scrub:
         props = _get(self.load(self.catalog), "OCProperties")
         if not mupdf.pdf_is_dict(props):
             return
-        used = self.layers_used_by(self.pages | self.removed_annots)
+        used = self.layer_candidates
         if not used:
             return
         reachable, _ = self.reachable(skip_layers=True)
@@ -494,15 +612,47 @@ class _Scrub:
 
     # ---- 参照を取り除く・確かめる ----
 
-    def clean(self, obj, key: str = "") -> None:
-        """obj（の直接の中身）から、消すものへの参照を取り除く。"""
+    def clean(self, obj, key: str = "", depth: int = 0) -> None:
+        """obj（の直接の中身）から、消すものへの参照を取り除く。行き先を失った GoTo は、/Next が
+        あればそれで置き換える。"""
+        if depth > _MAX_DEPTH:
+            raise UnscrubbableError("object nested too deeply")
         if mupdf.pdf_is_dict(obj):
             for i in reversed(range(mupdf.pdf_dict_len(obj))):
                 k, v = mupdf.pdf_dict_get_key(obj, i), mupdf.pdf_dict_get_val(obj, i)
-                if self.dead(v):
+                name = _name(k)
+                if self.dead(v) or (name == "Dest" and self.dead_name(v)):
                     mupdf.pdf_dict_del(obj, k)  # null の値は「キーがない」と同じ
-                elif _is_container(v):
-                    self.clean(v, _name(k))
+                    continue
+                actions = self.splice(v)
+                if actions is not None:
+                    if not actions:
+                        mupdf.pdf_dict_del(obj, k)
+                        continue
+                    if name == "Next":
+                        v = mupdf.pdf_new_array(self.pdf, len(actions))
+                        for a in actions:
+                            mupdf.pdf_array_push(v, a)
+                    else:
+                        v = self.single_action(actions)
+                    mupdf.pdf_dict_put(obj, k, v)
+                    v = mupdf.pdf_dict_get(obj, k)
+                if _is_container(v):
+                    self.clean(v, name, depth + 1)
+                    if name == "Next" and mupdf.pdf_is_array(v) and not mupdf.pdf_array_len(v):
+                        mupdf.pdf_dict_del(obj, k)
+        elif mupdf.pdf_is_array(obj) and key == "Next":  # アクションの列: 外す・継ぐ
+            for i in reversed(range(mupdf.pdf_array_len(obj))):
+                v = mupdf.pdf_array_get(obj, i)
+                actions = [] if self.dead(v) else self.splice(v)
+                if actions is not None:
+                    mupdf.pdf_array_delete(obj, i)
+                    for a in reversed(actions):
+                        mupdf.pdf_array_insert(obj, a, i)
+            for i in range(mupdf.pdf_array_len(obj)):
+                v = mupdf.pdf_array_get(obj, i)
+                if _is_container(v):
+                    self.clean(v, "", depth + 1)
         elif mupdf.pdf_is_array(obj):
             n = mupdf.pdf_array_len(obj)
             pairs = key in ("Names", "Nums") and n % 2 == 0 and all(
@@ -518,7 +668,7 @@ class _Scrub:
                 if self.dead(v):
                     mupdf.pdf_array_put(obj, i, _NULL)
                 elif _is_container(v):
-                    self.clean(v)
+                    self.clean(v, "", depth + 1)
 
     def reachable(self, skip_layers: bool = False) -> tuple[set[int], dict[int, set[int]]]:
         """トレーラーからたどれるオブジェクト（消すものの先へはたどらない）と、そのうち消すものを
@@ -542,9 +692,82 @@ class _Scrub:
 
 
 def _remove_references(s: _Scrub) -> None:
-    """消すもの以外のすべてのオブジェクトから、消すものへの参照を取り除く。"""
-    for x in s.candidates(s.removed):
+    """消すもの以外のすべてのオブジェクトから、消すものへの参照を取り除く。行き先を失った名前付きの
+    行き先を名前で指すものと、/Next を継ぐ GoTo（間接オブジェクト）を参照するものも直す。"""
+    todo = set(s.candidates(s.removed | s.spliced))
+    if s.dead_names:
+        todo |= s.dest_holders - s.removed
+    for x in sorted(todo - s.spliced):  # /Next を継ぐ GoTo そのものは触らない（参照がなくなり落ちる）
         s.clean(s.load(x))
+
+
+def _limit(node, i: int):
+    lim = _get(node, "Limits")
+    return mupdf.pdf_array_get(lim, i) if mupdf.pdf_is_array(lim) and mupdf.pdf_array_len(lim) == 2 \
+        else None
+
+
+def _fix_tree(pdf, node, nums: bool, is_root: bool, depth: int, seen: set[int]) -> bool:
+    """名前ツリー・数値ツリーの節 node の /Limits を、残っている組から数え直す（組は鍵の順に
+    並んでいるので、最初と最後の鍵）。空になった子は /Kids から外す。空でなければ True。"""
+    if not mupdf.pdf_is_dict(node):
+        return False
+    num = _num(node)
+    if num:
+        if num in seen:  # 壊れたファイルで同じ節に二度来た: そのまま残す
+            return True
+        seen.add(num)
+    if depth > _MAX_DEPTH:
+        return True
+    key = "Nums" if nums else "Names"
+    first = last = None
+    leaf = _get(node, key)
+    if mupdf.pdf_is_array(leaf):
+        n = mupdf.pdf_array_len(leaf)
+        if n >= 2:
+            first, last = mupdf.pdf_array_get(leaf, 0), mupdf.pdf_array_get(leaf, (n - 2) // 2 * 2)
+        else:
+            mupdf.pdf_dict_dels(node, key)
+    kids = _get(node, "Kids")
+    if mupdf.pdf_is_array(kids):
+        for i in reversed(range(mupdf.pdf_array_len(kids))):
+            if not _fix_tree(pdf, mupdf.pdf_array_get(kids, i), nums, False, depth + 1, seen):
+                mupdf.pdf_array_delete(kids, i)
+        n = mupdf.pdf_array_len(kids)
+        if not n:
+            mupdf.pdf_dict_dels(node, "Kids")
+        elif first is None:
+            first, last = _limit(mupdf.pdf_array_get(kids, 0), 0), _limit(mupdf.pdf_array_get(kids, n - 1), 1)
+            if first is None or last is None:  # 子の範囲が分からない: 節はそのまま残す
+                return True
+    if first is None:
+        return False
+    if not is_root:
+        limits = mupdf.pdf_new_array(pdf, 2)
+        mupdf.pdf_array_push(limits, mupdf.pdf_deep_copy_obj(first))
+        mupdf.pdf_array_push(limits, mupdf.pdf_deep_copy_obj(last))
+        mupdf.pdf_dict_puts(node, "Limits", limits)
+    return True
+
+
+def _fix_trees(s: _Scrub) -> None:
+    """組を外したかもしれない名前ツリー（/Names の各ツリーと構造の IDTree）と数値ツリー
+    （ParentTree）の /Limits を数え直し、空になった節とツリーを外す。"""
+    root = mupdf.pdf_trailer(s.pdf)
+    catalog = _get(root, "Root")
+    names = _get(catalog, "Names")
+    if mupdf.pdf_is_dict(names):
+        for i in reversed(range(mupdf.pdf_dict_len(names))):
+            if not _fix_tree(s.pdf, mupdf.pdf_dict_get_val(names, i), False, True, 0, set()):
+                mupdf.pdf_dict_del(names, mupdf.pdf_dict_get_key(names, i))
+        if not mupdf.pdf_dict_len(names):
+            mupdf.pdf_dict_dels(catalog, "Names")
+    struct = _get(catalog, "StructTreeRoot")
+    if mupdf.pdf_is_dict(struct):
+        for key, nums in (("IDTree", False), ("ParentTree", True)):
+            tree = _get(struct, key)
+            if mupdf.pdf_is_dict(tree) and not _fix_tree(s.pdf, tree, nums, True, 0, set()):
+                mupdf.pdf_dict_dels(struct, key)
 
 
 def scrub_detached_pages(doc: pymupdf.Document, pages: Iterable[int],
@@ -557,14 +780,19 @@ def scrub_detached_pages(doc: pymupdf.Document, pages: Iterable[int],
         return 0
     s = _Scrub(doc, pages, set(untargeted_outline))
     s.check_pages()
+    if not s.pages:
+        return 0
     s.read_text_refs()
     s.collect_annotations()
+    s.note_layers()
+    s.prune_shared_resources()
     s.mark_dead_destinations()
     s.prune_structure()
     s.prune_outline()
     s.prune_threads()
     s.prune_layers()
     _remove_references(s)
+    _fix_trees(s)
     _, leftover = s.reachable()
     if leftover:
         raise UnscrubbableError(f"references to removed objects remain: {leftover}")
