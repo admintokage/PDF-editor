@@ -44,6 +44,8 @@ class DetachedPages:
     page_xrefs: list[int]                   # indices と同じ順のページオブジェクト
     removals: list[_Removal] = field(default_factory=list)   # 外した順
     changed_objects: dict[int, str] = field(default_factory=dict)  # 書き換え前のオブジェクト
+    # 削除で PyMuPDF が行き先を外したしおりの項目（保存の掃除で、削除ページを指していたと分かるように）
+    untargeted_outline: frozenset[int] = frozenset()
 
 
 def _array(pdf, owner: int):

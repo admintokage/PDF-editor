@@ -1,4 +1,5 @@
 """PDF 文書の読み込み。Qt には依存しない。"""
+import logging
 import threading
 from dataclasses import dataclass
 from pathlib import Path
@@ -8,9 +9,20 @@ import pymupdf
 from pdfeditor.core import errors, page_detach, safe_save, scrub
 from pdfeditor.core.page_detach import DetachedPages
 
+log = logging.getLogger(__name__)
+
 _PERM_OWNER_BIT = 4  # authenticate() の戻り値で、権限パスワード一致を示すビット
 _SCRUB_FAILED = ("削除したページの一部をファイルから取り除けなかったため、保存を中止しました。"
                  "元のファイルはそのままです。")
+_WRITE_FAILED = "保存できませんでした。元のファイルはそのままです。別の名前で保存してみてください。"
+
+
+@dataclass(frozen=True)
+class _Snapshot:
+    """保存する瞬間の文書。data は garbage なしのバイト列（オブジェクト番号は文書と同じ）。"""
+    data: bytes
+    detached_pages: frozenset[int]       # このセッションで外していて、まだ戻していないページ
+    untargeted_outline: frozenset[int]   # 削除で行き先を外したしおりの項目
 
 PAGE_SIZES: dict[str, tuple[float, float]] = {
     "A4 縦": (595, 842), "A4 横": (842, 595),
@@ -112,6 +124,8 @@ class PdfDocument:
         # 記録やログには出さない。
         self._password = password
         self._tree_flat = False  # ページツリーの受け継ぎ属性をページに書き写したか
+        # このセッションで外していて、まだ戻していないページ。保存の写しでこれだけを掃除する
+        self._detached: list[DetachedPages] = []
 
     def _ensure_flat_tree(self) -> None:
         """ページの構成を変える前に一度だけ、受け継ぎ属性を各ページに書き写す（lock を保持して呼ぶ）。
@@ -232,6 +246,7 @@ class PdfDocument:
                 xref for i in order for xref, kind, _ in self._page(i).annot_xrefs()
                 if kind == pymupdf.PDF_ANNOT_WIDGET
             ]
+            outline = set(self.fitz.get_outline_xrefs())
             before = page_detach.objects_touched_by_delete(self.fitz, keep)
             removals: list = []
             detached = False
@@ -240,7 +255,10 @@ class PdfDocument:
                 self.fitz.delete_pages(order)
                 detached = True
                 changed = page_detach.only_changed(self.fitz, before)
-                return DetachedPages(order, page_xrefs, removals, changed)
+                result = DetachedPages(order, page_xrefs, removals, changed,
+                                       frozenset(outline.intersection(changed)))
+                self._detached.append(result)
+                return result
             except BaseException:
                 # 途中で失敗したら、文書を削除前の状態に戻してから知らせる
                 if detached:
@@ -257,6 +275,7 @@ class PdfDocument:
             page_detach.insert_page_objects(self.fitz, detached.indices, detached.page_xrefs)
             page_detach.restore_form_fields(self.fitz, detached.removals)
             page_detach.restore_objects(self.fitz, detached.changed_objects)
+            self._detached = [d for d in self._detached if d is not detached]
 
     def insert_blank(self, at: int, width: float, height: float) -> None:
         with self.lock:
@@ -322,40 +341,55 @@ class PdfDocument:
                 page = self._page(i)
                 page.set_rotation((page.rotation + delta) % 360)
 
-    def _snapshot(self) -> bytes:
-        """今の文書をそのままバイト列にする（lock を保持して呼ぶ）。garbage なしなので文書の中身は
-        変わらない（削除を元に戻すために残してあるページも残る）。暗号化は元のまま。"""
-        return self.fitz.tobytes(encryption=pymupdf.PDF_ENCRYPT_KEEP)
+    def _snapshot(self) -> _Snapshot:
+        """今の文書をそのままバイト列にし、外しているページの控えと組にする（lock を保持して呼ぶ）。
+        garbage なしなので文書の中身は変わらず（削除を元に戻すために残してあるページも残る）、
+        オブジェクトの番号も変わらない。暗号化は元のまま。"""
+        return _Snapshot(
+            self.fitz.tobytes(encryption=pymupdf.PDF_ENCRYPT_KEEP),
+            frozenset(x for d in self._detached for x in d.page_xrefs),
+            frozenset(x for d in self._detached for x in d.untargeted_outline),
+        )
 
-    def to_bytes(self, raw: bytes | None = None) -> bytes:
+    def to_bytes(self, snapshot: _Snapshot | None = None) -> bytes:
         """保存するバイト列。パスワードと編集制限は元のまま残す（PDF_ENCRYPT_KEEP）。
 
-        写し（raw から開いたもの）の上で、削除したページへの参照を取り除き（scrub）、不要
-        オブジェクトを掃除（garbage）する。生きている文書で掃除すると、元に戻すために残してある
-        ページが消えるため。raw を渡せば lock は要らない（写しは文書と独立している）。"""
-        if raw is None:
+        写し（snapshot から開いたもの）の上で、このセッションで外したページにだけ属するものを
+        取り除き（scrub）、不要オブジェクトを掃除（garbage）する。生きている文書で掃除すると、
+        元に戻すために残してあるページが消えるため。snapshot を渡せば lock は要らない
+        （写しは文書と独立している）。失敗はすべて SaveFailedError（記録に残す）。"""
+        if snapshot is None:
             with self.lock:
-                raw = self._snapshot()
-        keep = pymupdf.PDF_ENCRYPT_KEEP
-        copy = pymupdf.open(stream=raw, filetype="pdf")
+                snapshot = self._snapshot()
+        try:
+            copy = pymupdf.open(stream=snapshot.data, filetype="pdf")
+        except Exception as exc:  # noqa: BLE001
+            log.exception("could not reopen the snapshot for saving")
+            raise errors.SaveFailedError(_WRITE_FAILED, "other") from exc
         try:
             if copy.needs_pass:
                 copy.authenticate(self._password or "")
             try:
-                scrub.scrub_detached_pages(copy)
-            except scrub.UnscrubbableError as exc:
+                scrub.scrub_detached_pages(copy, snapshot.detached_pages,
+                                           snapshot.untargeted_outline)
+            except Exception as exc:  # noqa: BLE001 - 取り除けたと言えなければ保存しない
+                log.exception("scrubbing deleted pages failed; save refused")
                 raise errors.SaveFailedError(_SCRUB_FAILED, "verify_failed") from exc
-            return copy.tobytes(garbage=3, deflate=True, encryption=keep)
+            try:
+                return copy.tobytes(garbage=3, deflate=True, encryption=pymupdf.PDF_ENCRYPT_KEEP)
+            except Exception as exc:  # noqa: BLE001
+                log.exception("writing the saved copy failed")
+                raise errors.SaveFailedError(_WRITE_FAILED, "other") from exc
         finally:
             copy.close()
 
     def save(self, target: Path | None = None) -> None:
         """target が None または現在のパスと同じなら上書き（初回のみバックアップ）。
         失敗時は SaveFailedError で、元のファイルには触れない。成功後は self.path が保存先になる。"""
-        with self.lock:  # バイト列とページ数を同じ瞬間の状態で取る。ここだけ描画を止める
-            raw = self._snapshot()
+        with self.lock:  # バイト列・外したページ・ページ数を同じ瞬間の状態で取る。ここだけ描画を止める
+            snapshot = self._snapshot()
             pages = self.fitz.page_count
-        data = self.to_bytes(raw)  # 写しの掃除と書き出しは lock の外で
+        data = self.to_bytes(snapshot)  # 写しの掃除と書き出しは lock の外で
         dest = absolute_path(target) if target is not None else self.path
         if dest is None:
             raise errors.SaveFailedError("保存先が指定されていません。", "other")

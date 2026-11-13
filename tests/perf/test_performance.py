@@ -49,6 +49,19 @@ def test_500_pages_save_under_10s(big_pdf, tmp_path):
 
 
 @pytest.mark.perf
+def test_500_pages_save_with_100_deleted_under_10s(big_pdf, tmp_path):
+    """削除したページの掃除（scrub）を含む保存。"""
+    d = PdfDocument.open(big_pdf(500))
+    d.delete_pages(list(range(0, 500, 5)))
+    t = time.perf_counter()
+    d.save(tmp_path / "o.pdf")
+    elapsed = time.perf_counter() - t
+    d.close()
+    print(f"500 pages save with 100 deleted: {elapsed:.3f}s")
+    assert elapsed < 10.0
+
+
+@pytest.mark.perf
 def test_memory_stable_while_scrolling_500_pages(qtbot, big_pdf):
     proc = psutil.Process()
     v = make_view(qtbot, big_pdf(500))
