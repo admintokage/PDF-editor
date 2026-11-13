@@ -33,6 +33,17 @@ def _current(name: str) -> property:
     return property(lambda self: getattr(self.current_tab(), name, None))
 
 
+def _on_current_tab(name: str):
+    """表示中のタブの同じ名前のメソッドを呼ぶ。タブがない・保存中なら何もせず False。"""
+    def call(self, *args):
+        tab = self.current_tab()
+        if tab is None or self._saving:
+            return False
+        return bool(getattr(tab, name)(*args))
+    call.__name__ = name
+    return call
+
+
 class MainWindow(QMainWindow):
     instances: list["MainWindow"] = []
 
@@ -79,7 +90,7 @@ class MainWindow(QMainWindow):
         action = QAction(text, self)
         if shortcut:
             action.setShortcut(QKeySequence(shortcut))
-        action.triggered.connect(slot)
+        action.triggered.connect(lambda _checked=False: slot())  # checked を slot に渡さない
         if menu is not None:
             menu.addAction(action)
         return action
@@ -287,41 +298,19 @@ class MainWindow(QMainWindow):
         self.tab_widget.removeTab(self.tab_widget.indexOf(tab))
         tab.shutdown()  # 受け口を切り離し、描画スレッドを止めてから文書を閉じる
         tab.deleteLater()
+        self._update_actions()  # 表示中でないタブを閉じた時は currentChanged が来ないことがある
         self._update_title()
 
     # --- 表示中のタブへの操作（メニューと既存の呼び出しから） ---------------
-    def _on_tab(self, method: str, *args):
-        tab = self.current_tab()
-        if tab is None or self._saving:
-            return False
-        return getattr(tab, method)(*args)
-
-    def delete_selected_pages(self) -> None:
-        self._on_tab("delete_selected_pages")
-
-    def insert_blank_page(self) -> None:
-        self._on_tab("insert_blank_page")
-
-    def insert_pdf_pages(self) -> None:
-        self._on_tab("insert_pdf_pages")
-
-    def rotate_selected(self, delta: int) -> None:
-        self._on_tab("rotate_selected", delta)
-
-    def copy_selected_pages(self) -> bool:
-        return bool(self._on_tab("copy_selected_pages"))
-
-    def cut_selected_pages(self) -> bool:
-        return bool(self._on_tab("cut_selected_pages"))
-
-    def paste_pages(self) -> bool:
-        return bool(self._on_tab("paste_pages"))
-
-    def save(self) -> bool:
-        return bool(self._on_tab("save"))
-
-    def save_as(self) -> bool:
-        return bool(self._on_tab("save_as"))
+    delete_selected_pages = _on_current_tab("delete_selected_pages")
+    insert_blank_page = _on_current_tab("insert_blank_page")
+    insert_pdf_pages = _on_current_tab("insert_pdf_pages")
+    rotate_selected = _on_current_tab("rotate_selected")
+    copy_selected_pages = _on_current_tab("copy_selected_pages")
+    cut_selected_pages = _on_current_tab("cut_selected_pages")
+    paste_pages = _on_current_tab("paste_pages")
+    save = _on_current_tab("save")
+    save_as = _on_current_tab("save_as")
 
     # --- 開く -------------------------------------------------------------
     def _choose_and_open(self) -> None:

@@ -5,7 +5,9 @@ Windows で使える、無料の PDF エディタです。PDF の中身を、手
 ## この版（v0.1.0）でできること
 
 - PDF を開いて見る（拡大・縮小、ページ送り、ドラッグ＆ドロップで開く）
+- 複数の PDF をウィンドウ上部のタブで同時に開く（Ctrl+W でタブを閉じる、Ctrl+Tab で切り替え）
 - ページの並べ替え（サムネイルをドラッグ）、削除、空白ページの追加、別の PDF からのページ挿入、回転
+- ページのコピー・切り取り・貼り付け（サムネイルで選んで Ctrl+C / Ctrl+X / Ctrl+V。同じ PDF の中でも、別のタブの PDF へでも）
 - 操作の取り消し（元に戻す・やり直し）
 - 上書き保存、名前を付けて保存
 
@@ -42,7 +44,7 @@ Python 3.12 と [uv](https://docs.astral.sh/uv/) が必要です。
 
 ```powershell
 uv sync                         # 依存関係を入れる
-uv run python -m pdfeditor      # 起動する（PDF のパスを引数に渡すと開く）
+uv run python -m pdfeditor      # 起動する（PDF のパスを引数に渡すと、それぞれタブで開く）
 uv run pytest                   # テスト（画面なしの通常テスト）
 uv run pytest -m perf           # 性能テスト
 ```

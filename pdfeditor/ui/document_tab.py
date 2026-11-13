@@ -119,9 +119,6 @@ class DocumentTab(QWidget):
     def is_modified(self) -> bool:
         return not self.undo_stack.isClean()
 
-    def is_saving(self) -> bool:
-        return self._saving
-
     def set_blocked(self, blocked: bool) -> None:
         """ウィンドウの別のタブが保存中の間、このタブも操作を受け付けない。"""
         self._blocked = blocked
